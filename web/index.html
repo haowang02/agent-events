@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agent 请求事件</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%232563eb'/%3E%3Cpath d='M6 16l4-8 4 6 2-3 2 5' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+    <script>
+      document.documentElement.dataset.theme = localStorage.getItem("agent-events:theme") === "dark" ? "dark" : "light";
+    </script>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="app-bg" aria-hidden="true"></div>
+    <div class="wrap">
+      <header class="topbar">
+        <div class="brand">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="6" /><path d="M6 16l4-8 4 6 2-3 2 5" /></svg>
+          <span>Agent 请求事件</span>
+        </div>
+        <nav id="agent-switch" class="segmented" aria-label="Agent"></nav>
+        <div class="topbar-actions">
+          <span id="sync-status" class="muted small" aria-live="polite"></span>
+          <button id="theme-button" class="icon-button" type="button" aria-label="切换主题"></button>
+        </div>
+      </header>
+
+      <div class="tabs-bar card">
+        <div class="tabs" role="tablist" aria-label="页面">
+          <button type="button" role="tab" data-tab="events">请求事件</button>
+          <button type="button" role="tab" data-tab="analysis">统计分析</button>
+          <button type="button" role="tab" data-tab="prices">模型价格</button>
+        </div>
+        <div id="range-control" class="range-control">
+          <span class="native-select">
+            <select id="range-mode" aria-label="时间范围">
+              <option value="today">今天</option>
+              <option value="yesterday">昨天</option>
+              <option value="24h">最近 24 小时</option>
+              <option value="7d">最近 7 天</option>
+              <option value="30d">最近 30 天</option>
+              <option value="90d">最近 90 天</option>
+              <option value="all">全部时间</option>
+              <option value="custom">自定义</option>
+            </select>
+          </span>
+          <span id="range-custom" class="range-custom hidden">
+            <input id="range-from" type="datetime-local" aria-label="开始时间" />
+            <span class="muted">–</span>
+            <input id="range-to" type="datetime-local" aria-label="结束时间" />
+          </span>
+        </div>
+      </div>
+
+      <main>
+        <section id="tab-events" class="card hidden" aria-labelledby="events-title">
+          <div class="card-header">
+            <h2 id="events-title">请求事件</h2>
+            <div class="filters">
+              <input id="filter-q" class="search" type="search" placeholder="搜索" aria-label="搜索模型、会话、项目或错误" />
+              <span class="native-select"><select id="filter-model" aria-label="模型"></select></span>
+              <span class="native-select"><select id="filter-project" aria-label="项目"></select></span>
+              <span class="native-select"><select id="filter-status" aria-label="结果"></select></span>
+              <button id="filter-clear" class="link" type="button" disabled>清除筛选</button>
+              <button id="columns-button" class="button" type="button" aria-haspopup="dialog"></button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table id="events-table">
+              <thead></thead>
+              <tbody></tbody>
+            </table>
+            <div id="events-empty" class="empty hidden"></div>
+          </div>
+          <div class="table-footer">
+            <span id="events-note" class="muted small"></span>
+            <div class="pager">
+              <span class="native-select">
+                <select id="page-size" aria-label="每页条数">
+                  <option value="25">25 条/页</option>
+                  <option value="50">50 条/页</option>
+                  <option value="100">100 条/页</option>
+                  <option value="200">200 条/页</option>
+                </select>
+              </span>
+              <button id="page-prev" class="button" type="button" aria-label="上一页">‹</button>
+              <span id="page-info" class="muted small"></span>
+              <button id="page-next" class="button" type="button" aria-label="下一页">›</button>
+            </div>
+          </div>
+        </section>
+
+        <section id="tab-analysis" class="hidden">
+          <div id="analysis-content" class="analysis-content hidden">
+            <div id="summary" class="summary-grid"></div>
+            <section class="card analysis-card" aria-labelledby="trend-title">
+              <div class="analysis-card-header">
+                <h2 id="trend-title">用量趋势</h2>
+                <div id="trend-controls" class="analysis-controls"></div>
+              </div>
+              <div id="trend-legend"></div>
+              <div class="chart-box"><canvas id="trend-chart" role="img" aria-label="用量趋势图"></canvas><div class="empty hidden"></div></div>
+            </section>
+            <section class="card analysis-card" aria-labelledby="distribution-title">
+              <div class="analysis-card-header">
+                <h2 id="distribution-title">用量分布</h2>
+                <div id="distribution-controls" class="analysis-controls"></div>
+              </div>
+              <div class="distribution-layout">
+                <div class="distribution-chart"><canvas id="distribution-chart" role="img" aria-label="用量分布图"></canvas><div class="empty hidden"></div></div>
+                <div id="distribution-list" class="distribution-list"></div>
+              </div>
+            </section>
+            <section class="card analysis-card" aria-labelledby="speed-title">
+              <div class="analysis-card-header">
+                <h2 id="speed-title">速度趋势</h2>
+                <div id="speed-controls" class="analysis-controls"></div>
+              </div>
+              <div id="speed-legend"></div>
+              <div class="chart-box"><canvas id="speed-chart" role="img" aria-label="速度趋势图"></canvas><div class="empty hidden"></div></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="tab-prices" class="card hidden" aria-labelledby="prices-title">
+          <div class="card-header">
+            <h2 id="prices-title">模型价格</h2>
+            <button id="catalog-refresh" class="button" type="button">更新参考价</button>
+          </div>
+          <div class="table-wrap"><table id="prices-table"></table></div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="columns-dialog" class="column-dialog" aria-labelledby="columns-title">
+      <h2 id="columns-title">列设置</h2>
+      <div id="columns-list" class="column-settings"></div>
+      <p id="columns-status" class="visually-hidden" aria-live="polite"></p>
+      <div class="dialog-actions">
+        <button id="columns-reset" class="link" type="button">恢复默认</button>
+        <span class="spacer"></span>
+        <button id="columns-cancel" class="button" type="button">取消</button>
+        <button id="columns-save" class="button primary" type="button">保存</button>
+      </div>
+    </dialog>
+
+    <dialog id="price-dialog" class="price-dialog" aria-labelledby="price-model">
+      <form id="price-form" method="dialog">
+        <h2 id="price-model" class="mono"></h2>
+        <input id="price-search" type="search" placeholder="从 models.dev 填入" aria-label="搜索 models.dev" autocomplete="off" />
+        <div id="price-search-results" class="search-results"></div>
+        <div class="price-grid">
+          <span></span>
+          <span>输入 $/M</span>
+          <span>输出 $/M</span>
+          <span>缓存读 $/M</span>
+          <span>缓存写 $/M</span>
+          <span>标准</span>
+          <input id="price-input" type="number" min="0" step="any" required aria-label="输入" />
+          <input id="price-output" type="number" min="0" step="any" required aria-label="输出" />
+          <input id="price-cache_read" type="number" min="0" step="any" aria-label="缓存读" />
+          <input id="price-cache_write" type="number" min="0" step="any" aria-label="缓存写" />
+          <label class="price-threshold">&gt; <input id="price-threshold" type="number" min="1" step="1" placeholder="长上下文" aria-label="长上下文阈值（Token）" /></label>
+          <input id="price-long-input" type="number" min="0" step="any" aria-label="长上下文输入" />
+          <input id="price-long-output" type="number" min="0" step="any" aria-label="长上下文输出" />
+          <input id="price-long-cache_read" type="number" min="0" step="any" aria-label="长上下文缓存读" />
+          <input id="price-long-cache_write" type="number" min="0" step="any" aria-label="长上下文缓存写" />
+        </div>
+        <p id="price-error" class="notice error hidden"></p>
+        <div class="dialog-actions">
+          <span class="spacer"></span>
+          <button id="price-cancel" class="button" type="button">取消</button>
+          <button class="button primary" type="submit">保存</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div id="tooltip" class="hover-tooltip" role="tooltip" popover="manual"></div>
+    <script src="vendor/chart.umd.min.js"></script>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
