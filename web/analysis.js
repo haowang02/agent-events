@@ -1,5 +1,5 @@
 import { $, el, hideTip } from "./dom.js";
-import { api, pref, savePref, state, rangeParams, int, tokens, usd, latency, percent, shortPath, projectName, agentName, AGENTS, seriesColor, cssVar } from "./core.js";
+import { api, pref, savePref, state, rangeParams, int, tokens, usd, latency, percent, shortPath, projectName, agentName, agentSlot, seriesColor, cssVar } from "./core.js";
 import { drawChart, tooltipStyle, timeSeriesOptions, legend, toggleLegend, sparkline } from "./charts.js";
 
 const STATUS_GOOD = "#0ca30c";
@@ -223,7 +223,7 @@ function distributionRows(rows, dimension, metric) {
   let colored;
   if (dimension === "agents") {
     colored = rows
-      .map((row) => ({ ...row, slot: AGENTS[row.key]?.slot }))
+      .map((row) => ({ ...row, slot: agentSlot(row.key) }))
       .sort((a, b) => (a.slot || 9) - (b.slot || 9))
       .map((row) => ({ ...row, color: row.slot ? seriesColor(row.slot) : cssVar("--series-other") }));
   } else {

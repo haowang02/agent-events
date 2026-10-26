@@ -1,13 +1,11 @@
-// Command agent-events collects model request events from local coding agent
-// logs (Claude Code, Codex, OpenCode, Antigravity) and serves a web UI to
-// browse and analyze them.
+// Command agent-events collects model request events from the local logs of
+// coding agents and serves a web UI to browse and analyze them.
 package main
 
 import (
 	"context"
-	"embed"
 	"flag"
-	"io/fs"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -15,10 +13,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+
+	"github.com/haowang02/agent-events/internal/pricing"
+	"github.com/haowang02/agent-events/internal/server"
+	"github.com/haowang02/agent-events/internal/store"
+	"github.com/haowang02/agent-events/web"
 )
 
-//go:embed web
-var webFiles embed.FS
+// version is set at release builds.
+var version = "dev"
 
 func defaultDataDir() string {
 	if dir := os.Getenv("XDG_DATA_HOME"); dir != "" {
@@ -48,26 +51,32 @@ func main() {
 	dataDir := flag.String("data", defaultDataDir(), "directory for collected events, custom prices and the models.dev cache")
 	noOpen := flag.Bool("no-open", false, "do not open the browser")
 	rebuild := flag.Bool("rebuild", false, "discard collected events and parse every source again; custom prices are kept")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
 
 	if err := os.MkdirAll(*dataDir, 0o755); err != nil {
 		log.Fatal(err)
 	}
-	store, err := openStore(filepath.Join(*dataDir, "events.db"))
+	events, err := store.Open(filepath.Join(*dataDir, "events.db"))
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer store.Close()
+	defer events.Close()
 	if *rebuild {
-		if err := store.Reset(); err != nil {
+		if err := events.Reset(); err != nil {
 			log.Fatal(err)
 		}
 	}
-	pricer, err := newPricer(store, filepath.Join(*dataDir, "models-dev.json"))
+	custom, err := events.CustomPrices()
 	if err != nil {
 		log.Fatal(err)
 	}
-	app, err := newApp(store, pricer, *dataDir)
+	pricer := pricing.NewPricer(filepath.Join(*dataDir, "models-dev.json"), custom)
+	srv, err := server.New(events, pricer, web.Files, *dataDir)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -80,11 +89,11 @@ func main() {
 		}
 	}
 	url := "http://" + listener.Addr().String()
-	log.Printf("agent-events serving %s (data: %s)", url, *dataDir)
-	go app.Watch()
+	log.Printf("agent-events %s serving %s (data: %s)", version, url, *dataDir)
+	go srv.Watch()
 	if pricer.Stale() {
 		go func() {
-			if err := app.RefreshPrices(context.Background()); err != nil {
+			if err := srv.RefreshPrices(context.Background()); err != nil {
 				log.Printf("models.dev: %v", err)
 			}
 		}()
@@ -92,6 +101,5 @@ func main() {
 	if !*noOpen {
 		openBrowser(url)
 	}
-	web, _ := fs.Sub(webFiles, "web")
-	log.Fatal(http.Serve(listener, app.routes(web)))
+	log.Fatal(http.Serve(listener, srv.Handler()))
 }

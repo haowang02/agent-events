@@ -3,6 +3,7 @@ module github.com/haowang02/agent-events
 go 1.26.0
 
 require (
+	github.com/klauspost/compress v1.20.3
 	google.golang.org/protobuf v1.36.12
 	modernc.org/sqlite v1.61.0
 )

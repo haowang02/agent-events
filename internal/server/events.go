@@ -1,11 +1,15 @@
-package main
+package server
 
 import (
 	"cmp"
+	"net/http"
 	"net/url"
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/haowang02/agent-events/internal/event"
+	"github.com/haowang02/agent-events/internal/pricing"
 )
 
 type Filter struct {
@@ -34,7 +38,7 @@ func parseFilter(query url.Values) Filter {
 
 // scope matches the agent, time range and text search: the selection that
 // filter options are counted over.
-func (f Filter) scope(e *Event) bool {
+func (f Filter) scope(e *event.Event) bool {
 	if f.Agent != "" && e.Agent != f.Agent {
 		return false
 	}
@@ -50,11 +54,11 @@ func (f Filter) scope(e *Event) bool {
 	return true
 }
 
-func (f Filter) fields(e *Event) bool {
+func (f Filter) fields(e *event.Event) bool {
 	return (f.Model == "" || e.Model == f.Model) && (f.Project == "" || e.Project == f.Project)
 }
 
-func (f Filter) status(e *Event) bool {
+func (f Filter) status(e *event.Event) bool {
 	switch f.Status {
 	case "ok":
 		return !e.Failed
@@ -64,7 +68,7 @@ func (f Filter) status(e *Event) bool {
 	return true
 }
 
-func (f Filter) match(e *Event) bool { return f.scope(e) && f.fields(e) && f.status(e) }
+func (f Filter) match(e *event.Event) bool { return f.scope(e) && f.fields(e) && f.status(e) }
 
 type Option struct {
 	Value string `json:"value"`
@@ -81,15 +85,15 @@ func countOptions(counts map[string]int) []Option {
 }
 
 type EventView struct {
-	*Event
-	TotalTokens int64    `json:"total_tokens"`
-	TPS         *float64 `json:"tps"`
-	Price       *Price   `json:"price"`
-	Cost        *Cost    `json:"cost"`
+	*event.Event
+	TotalTokens int64          `json:"total_tokens"`
+	TPS         *float64       `json:"tps"`
+	Price       *pricing.Price `json:"price"`
+	Cost        *pricing.Cost  `json:"cost"`
 }
 
-func (a *App) view(e *Event) EventView {
-	price := a.pricer.Resolve(e.Model)
+func (s *Server) view(e *event.Event) EventView {
+	price := s.pricer.Resolve(e.Model, e.Time)
 	view := EventView{Event: e, TotalTokens: e.TotalTokens(), Price: price}
 	if tps, ok := e.OutputTPS(); ok {
 		view.TPS = &tps
@@ -151,30 +155,30 @@ func optional(value *float64) float64 {
 	return *value
 }
 
-func (a *App) Events(filter Filter, sortKey string, descending bool, offset, limit int) EventsResult {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
+func (s *Server) Events(filter Filter, sortKey string, descending bool, offset, limit int) EventsResult {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	result := EventsResult{StatusCounts: map[string]int{}}
 	models, projects := map[string]int{}, map[string]int{}
 	views := []EventView{}
-	for i := range a.events {
-		event := &a.events[i]
-		if !filter.scope(event) {
+	for i := range s.events {
+		e := &s.events[i]
+		if !filter.scope(e) {
 			continue
 		}
-		models[event.Model]++
-		projects[event.Project]++
-		if !filter.fields(event) {
+		models[e.Model]++
+		projects[e.Project]++
+		if !filter.fields(e) {
 			continue
 		}
 		result.StatusCounts["all"]++
-		if event.Failed {
+		if e.Failed {
 			result.StatusCounts["failed"]++
 		} else {
 			result.StatusCounts["ok"]++
 		}
-		if filter.status(event) {
-			views = append(views, a.view(event))
+		if filter.status(e) {
+			views = append(views, s.view(e))
 		}
 	}
 	result.Models, result.Projects = countOptions(models), countOptions(projects)
@@ -193,42 +197,15 @@ func (a *App) Events(filter Filter, sortKey string, descending bool, offset, lim
 	return result
 }
 
-type ModelPrice struct {
-	Model    string   `json:"model"`
-	Agents   []string `json:"agents"`
-	Requests int      `json:"requests"`
-	Tokens   int64    `json:"total_tokens"`
-	Price    *Price   `json:"price"`
-}
-
-// ModelPrices lists every model seen in events with the price it resolves to.
-func (a *App) ModelPrices() []ModelPrice {
-	a.mu.RLock()
-	byModel := map[string]*ModelPrice{}
-	for i := range a.events {
-		event := &a.events[i]
-		if event.Model == "" {
-			continue
-		}
-		row := byModel[event.Model]
-		if row == nil {
-			row = &ModelPrice{Model: event.Model}
-			byModel[event.Model] = row
-		}
-		row.Requests++
-		row.Tokens += event.TotalTokens()
-		if !slices.Contains(row.Agents, event.Agent) {
-			row.Agents = append(row.Agents, event.Agent)
-		}
+func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	sortKey := query.Get("sort")
+	if _, ok := eventSorts[sortKey]; !ok {
+		sortKey = "time"
 	}
-	a.mu.RUnlock()
-	rows := make([]ModelPrice, 0, len(byModel))
-	for _, row := range byModel {
-		row.Price = a.pricer.Resolve(row.Model)
-		rows = append(rows, *row)
-	}
-	slices.SortFunc(rows, func(x, y ModelPrice) int {
-		return cmp.Or(cmp.Compare(y.Requests, x.Requests), cmp.Compare(x.Model, y.Model))
-	})
-	return rows
+	result := s.Events(
+		parseFilter(query), sortKey, query.Get("order") != "asc",
+		queryInt(r, "offset", 0, 0, 1<<30), queryInt(r, "limit", 50, 1, 500),
+	)
+	writeJSON(w, http.StatusOK, result)
 }

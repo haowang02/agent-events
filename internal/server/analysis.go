@@ -1,8 +1,9 @@
-package main
+package server
 
 import (
 	"cmp"
 	"math"
+	"net/http"
 	"slices"
 	"time"
 )
@@ -168,15 +169,15 @@ var distributionKeys = map[string]func(*EventView) string{
 // Analysis summarizes the matching events. Speed covers one model, the
 // requested one or else the one with most timed requests, since different
 // models' speeds are not comparable.
-func (a *App) Analysis(filter Filter, location *time.Location, speedModel string) Analysis {
-	a.mu.RLock()
+func (s *Server) Analysis(filter Filter, location *time.Location, speedModel string) Analysis {
+	s.mu.RLock()
 	var views []EventView
-	for i := range a.events {
-		if event := &a.events[i]; filter.match(event) {
-			views = append(views, a.view(event))
+	for i := range s.events {
+		if e := &s.events[i]; filter.match(e) {
+			views = append(views, s.view(e))
 		}
 	}
-	a.mu.RUnlock()
+	s.mu.RUnlock()
 
 	from, to := filter.From, filter.To
 	if to == 0 {
@@ -265,4 +266,13 @@ func (a *App) Analysis(filter Filter, location *time.Location, speedModel string
 		result.SpeedTrend[i] = speedStats(buckets.starts[i], values)
 	}
 	return result
+}
+
+func (s *Server) handleAnalysis(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	location, err := time.LoadLocation(query.Get("tz"))
+	if err != nil {
+		location = time.Local
+	}
+	writeJSON(w, http.StatusOK, s.Analysis(parseFilter(query), location, query.Get("speed_model")))
 }

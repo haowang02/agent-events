@@ -1,5 +1,5 @@
 import { $, el, icon, tip, hideTip } from "./dom.js";
-import { savePref, state, int, agentColor, AGENTS, AGENT_ORDER, clockTime } from "./core.js";
+import { savePref, state, int, agentColor, agentName, AGENTS, clockTime } from "./core.js";
 import { initEvents, loadEvents, resetEventPage } from "./events.js";
 import { loadAnalysis, renderAnalysis } from "./analysis.js";
 import { initPrices, loadPrices } from "./prices.js";
@@ -13,11 +13,15 @@ function reload() {
   });
 }
 
+// Agents with events, most first, and the selected one even when it has none.
 function renderAgents() {
   const counts = state.server?.counts || {};
   const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
+  const agents = Object.keys(AGENTS)
+    .filter((id) => counts[id] > 0 || id === state.agent)
+    .sort((a, b) => (counts[b] || 0) - (counts[a] || 0));
   $("agent-switch").replaceChildren(
-    ...[["", "全部", total], ...AGENT_ORDER.map((id) => [id, AGENTS[id].name, counts[id] || 0])].map(([id, name, count]) =>
+    ...[["", "全部", total], ...agents.map((id) => [id, agentName(id), counts[id] || 0])].map(([id, name, count]) =>
       el(
         "button",
         {

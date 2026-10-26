@@ -1,4 +1,6 @@
-package main
+// Package store keeps collected events, the signatures of parsed sources and
+// custom prices in SQLite.
+package store
 
 import (
 	"database/sql"
@@ -7,6 +9,10 @@ import (
 	"strings"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/haowang02/agent-events/internal/collect"
+	"github.com/haowang02/agent-events/internal/event"
+	"github.com/haowang02/agent-events/internal/pricing"
 )
 
 const schema = `
@@ -20,6 +26,7 @@ CREATE TABLE IF NOT EXISTS events (
 	project TEXT NOT NULL DEFAULT '',
 	client TEXT NOT NULL DEFAULT '',
 	kind TEXT NOT NULL DEFAULT '',
+	scope TEXT NOT NULL DEFAULT '',
 	effort TEXT NOT NULL DEFAULT '',
 	tier TEXT NOT NULL DEFAULT '',
 	input_tokens INTEGER NOT NULL DEFAULT 0,
@@ -49,30 +56,32 @@ CREATE TABLE IF NOT EXISTS custom_prices (
 );`
 
 var eventColumns = []string{
-	"agent", "id", "time", "model", "provider", "session", "project", "client", "kind", "effort", "tier",
+	"agent", "id", "time", "model", "provider", "session", "project", "client", "kind", "scope", "effort", "tier",
 	"input_tokens", "cache_read_tokens", "cache_write_tokens", "cache_write_1h_tokens", "output_tokens", "reasoning_tokens",
 	"latency_ms", "ttft_ms", "failed", "error", "stop", "version", "source",
 }
 
-func eventFields(e *Event) []any {
+func eventFields(e *event.Event) []any {
 	return []any{
-		e.Agent, e.ID, e.Time, e.Model, e.Provider, e.Session, e.Project, e.Client, e.Kind, e.Effort, e.Tier,
+		e.Agent, e.ID, e.Time, e.Model, e.Provider, e.Session, e.Project, e.Client, e.Kind, e.Scope, e.Effort, e.Tier,
 		e.InputTokens, e.CacheReadTokens, e.CacheWriteTokens, e.CacheWrite1hTokens, e.OutputTokens, e.ReasoningTokens,
 		e.LatencyMS, e.TTFTMS, e.Failed, e.Error, e.Stop, e.Version, e.Source,
 	}
 }
 
-func eventTargets(e *Event) []any {
+func eventTargets(e *event.Event) []any {
 	return []any{
-		&e.Agent, &e.ID, &e.Time, &e.Model, &e.Provider, &e.Session, &e.Project, &e.Client, &e.Kind, &e.Effort, &e.Tier,
+		&e.Agent, &e.ID, &e.Time, &e.Model, &e.Provider, &e.Session, &e.Project, &e.Client, &e.Kind, &e.Scope, &e.Effort, &e.Tier,
 		&e.InputTokens, &e.CacheReadTokens, &e.CacheWriteTokens, &e.CacheWrite1hTokens, &e.OutputTokens, &e.ReasoningTokens,
 		&e.LatencyMS, &e.TTFTMS, &e.Failed, &e.Error, &e.Stop, &e.Version, &e.Source,
 	}
 }
 
-// The same request can appear in several files, e.g. when a session is
-// resumed into a new transcript; the copy with timing information wins.
-// Identical rows are left alone, so the affected count reports real changes.
+// The same request can be recorded in several sources: a resumed session's
+// new transcript, a fork that replays its parent, or a compressed copy. The
+// copy with timing information wins, then the earliest, which is the
+// original. Identical rows are left alone, so the affected count reports
+// real changes.
 var upsertEventSQL = func() string {
 	var updates, existing, incoming []string
 	for _, column := range eventColumns[2:] {
@@ -81,8 +90,9 @@ var upsertEventSQL = func() string {
 		incoming = append(incoming, "excluded."+column)
 	}
 	return fmt.Sprintf(
-		"INSERT INTO events (%s) VALUES (?%s) ON CONFLICT (agent, id) DO UPDATE SET %s "+
-			"WHERE (events.latency_ms = 0 OR excluded.latency_ms > 0) AND (%s) IS NOT (%s)",
+		"INSERT INTO events (%s) VALUES (?%s) ON CONFLICT (agent, id) DO UPDATE SET %s WHERE "+
+			"((excluded.latency_ms > 0) > (events.latency_ms > 0) OR "+
+			"(excluded.latency_ms > 0) = (events.latency_ms > 0) AND excluded.time <= events.time) AND (%s) IS NOT (%s)",
 		strings.Join(eventColumns, ", "), strings.Repeat(", ?", len(eventColumns)-1), strings.Join(updates, ", "),
 		strings.Join(existing, ", "), strings.Join(incoming, ", "),
 	)
@@ -90,7 +100,7 @@ var upsertEventSQL = func() string {
 
 type Store struct{ db *sql.DB }
 
-func openStore(path string) (*Store, error) {
+func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)")
 	if err != nil {
 		return nil, err
@@ -112,15 +122,15 @@ func (s *Store) Reset() error {
 	return err
 }
 
-func (s *Store) Sources() (map[string]Source, error) {
+func (s *Store) Sources() (map[string]collect.Source, error) {
 	rows, err := s.db.Query("SELECT path, agent, size, mtime FROM sources")
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	sources := make(map[string]Source)
+	sources := make(map[string]collect.Source)
 	for rows.Next() {
-		var source Source
+		var source collect.Source
 		if err := rows.Scan(&source.Path, &source.Agent, &source.Size, &source.MTime); err != nil {
 			return nil, err
 		}
@@ -129,9 +139,9 @@ func (s *Store) Sources() (map[string]Source, error) {
 	return sources, rows.Err()
 }
 
-// Save stores parsed events and marks their sources as scanned in one
+// Save stores parsed events and marks their sources as parsed in one
 // transaction. It returns how many events were added or changed.
-func (s *Store) Save(events []Event, sources []Source) (int64, error) {
+func (s *Store) Save(events []event.Event, sources []collect.Source) (int64, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return 0, err
@@ -164,37 +174,39 @@ func (s *Store) Save(events []Event, sources []Source) (int64, error) {
 	return saved, tx.Commit()
 }
 
-func (s *Store) Events() ([]Event, error) {
+// Events returns every event, newest first.
+func (s *Store) Events() ([]event.Event, error) {
 	rows, err := s.db.Query("SELECT " + strings.Join(eventColumns, ", ") + " FROM events ORDER BY time DESC, agent, id")
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var events []Event
+	var events []event.Event
 	for rows.Next() {
-		var event Event
-		if err := rows.Scan(eventTargets(&event)...); err != nil {
+		var e event.Event
+		if err := rows.Scan(eventTargets(&e)...); err != nil {
 			return nil, err
 		}
-		events = append(events, event)
+		events = append(events, e)
 	}
 	return events, rows.Err()
 }
 
-func (s *Store) CustomPrices() (map[string]Rates, error) {
+// CustomPrices returns custom rates by model key.
+func (s *Store) CustomPrices() (map[string]pricing.Rates, error) {
 	rows, err := s.db.Query("SELECT model, rates FROM custom_prices")
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	prices := make(map[string]Rates)
+	prices := make(map[string]pricing.Rates)
 	for rows.Next() {
 		var model string
 		var raw []byte
 		if err := rows.Scan(&model, &raw); err != nil {
 			return nil, err
 		}
-		var rates Rates
+		var rates pricing.Rates
 		if err := json.Unmarshal(raw, &rates); err != nil {
 			return nil, fmt.Errorf("custom price of %s: %w", model, err)
 		}
@@ -203,7 +215,7 @@ func (s *Store) CustomPrices() (map[string]Rates, error) {
 	return prices, rows.Err()
 }
 
-func (s *Store) SetCustomPrice(model string, rates Rates) error {
+func (s *Store) SetCustomPrice(model string, rates pricing.Rates) error {
 	raw, err := json.Marshal(rates)
 	if err != nil {
 		return err

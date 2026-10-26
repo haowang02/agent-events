@@ -8,6 +8,9 @@ const line = (...children) => el("div", { class: "cell-line" }, ...children);
 const sub = (text) => el("div", { class: "cell-sub cell-line", text: text || "—" });
 const detail = (text, className = "") => tip(el("span", { class: "cell-detail " + className, text: text || "—" }), text, { overflowOnly: true });
 const promptTokens = (e) => e.input_tokens + e.cache_read_tokens + e.cache_write_tokens;
+const SCOPES = { turn: "轮次汇总", session: "会话汇总" };
+const costNotes = (cost) =>
+  [cost.long_context && "长上下文", cost.multiplier && `优先处理 ×${cost.multiplier}`].filter(Boolean).map((note) => " · " + note).join("");
 
 function costTooltip(entry) {
   const { cost } = entry;
@@ -34,7 +37,7 @@ function costTooltip(entry) {
       ])
     ),
     el("div", { class: "tip-total" }, el("span", { text: "合计" }), el("span", { text: usd(cost.total) })),
-    el("div", { class: "tip-note", text: priceSource(entry.price) + (cost.long_context ? " · 长上下文价格" : "") })
+    el("div", { class: "tip-note", text: priceSource(entry.price) + costNotes(cost) })
   ];
 }
 
@@ -116,7 +119,7 @@ const COLUMNS = [
       e.cost
         ? [
             el("div", {}, el("span", { class: "has-tip", text: usd(e.cost.total), tip: () => costTooltip(e) })),
-            el("div", { class: "cell-sub", text: (e.price.source === "custom" ? "自定义" : "参考价") + (e.cost.long_context ? " · 长上下文" : "") })
+            el("div", { class: "cell-sub", text: (e.price.source === "custom" ? "自定义" : "参考价") + costNotes(e.cost) })
           ]
         : el("span", { class: "muted", text: "未定价" })
   },
@@ -130,7 +133,10 @@ const COLUMNS = [
     id: "session",
     label: "会话",
     sort: "session",
-    cell: (e) => [line(detail(e.session, "mono"), e.session && copyButton("复制会话 ID", e.session)), sub(e.kind)]
+    cell: (e) => [
+      line(detail(e.session, "mono"), e.session && copyButton("复制会话 ID", e.session)),
+      sub([e.kind, SCOPES[e.scope]].filter(Boolean).join(" · "))
+    ]
   },
   { id: "client", label: "客户端", hidden: true, cell: (e) => [line(el("span", { text: e.client || "—" })), sub(e.version)] },
   { id: "stop", label: "结束原因", hidden: true, cell: (e) => el("span", { class: "mono", text: e.stop || "—" }) },

@@ -36,17 +36,36 @@ export async function api(method, path, body) {
   return value;
 }
 
-// Agent colors take categorical slots 1–4 in their validated order; the agent
-// name is always shown beside the color.
 export const AGENTS = {
-  claude: { name: "Claude Code", slot: 2 },
-  codex: { name: "Codex", slot: 1 },
-  opencode: { name: "OpenCode", slot: 3 },
-  antigravity: { name: "Antigravity", slot: 4 }
+  codex: "Codex",
+  claude: "Claude Code",
+  opencode: "OpenCode",
+  antigravity: "Antigravity",
+  gemini: "Gemini CLI",
+  copilot: "Copilot CLI",
+  kilo: "Kilo Code",
+  qwen: "Qwen Code",
+  amp: "Amp",
+  codebuff: "Codebuff",
+  droid: "Droid",
+  goose: "Goose",
+  grok: "Grok Build",
+  hermes: "Hermes",
+  kimi: "Kimi",
+  openclaw: "OpenClaw",
+  pi: "Pi",
+  zcode: "ZCode"
 };
-export const AGENT_ORDER = ["claude", "codex", "opencode", "antigravity"];
-export const agentName = (id) => AGENTS[id]?.name || id || "未知";
-export const agentColor = (id) => `var(--series-${AGENTS[id]?.slot || "other"})`;
+export const agentName = (id) => AGENTS[id] || id || "未知";
+
+// Agents with events take the categorical color slots in the order above;
+// the name is always shown beside the color.
+export function agentSlot(id) {
+  const counts = state.server?.counts || {};
+  const index = Object.keys(AGENTS).filter((agent) => counts[agent] > 0).indexOf(id);
+  return index >= 0 && index < 7 ? index + 1 : null;
+}
+export const agentColor = (id) => `var(--series-${agentSlot(id) || "other"})`;
 
 export function agentTag(id) {
   return el("span", { class: "agent-tag" }, el("i", { class: "agent-dot", style: { "--dot": agentColor(id) } }), agentName(id));

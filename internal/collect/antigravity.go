@@ -1,18 +1,44 @@
-package main
+package collect
 
 import (
 	"cmp"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 
 	"google.golang.org/protobuf/encoding/protowire"
+
+	"github.com/haowang02/agent-events/internal/event"
 )
 
-// Antigravity CLI (agy) keeps one SQLite database per conversation with
-// protobuf blobs and no published schema. Field numbers below were read from
-// its data and match Codeium's ModelUsageStats layout.
+// antigravity collects every Antigravity edition. A configured root may hold
+// a conversations directory or be one.
+func antigravity() Collector {
+	var patterns []string
+	if os.Getenv("ANTIGRAVITY_DATA_DIR") != "" {
+		for _, root := range roots("ANTIGRAVITY_DATA_DIR") {
+			patterns = append(patterns, filepath.Join(root, "conversations", "*.db"), filepath.Join(root, "*.db"))
+		}
+	} else {
+		for _, root := range []string{
+			homeDir(".gemini", "antigravity"), homeDir(".gemini", "antigravity-cli"), homeDir(".gemini", "antigravity-ide"),
+			homeDir(".gemini", "antigravity-backup"), homeDir(".gemini", "antigravity-acp"), homeDir(".config", "antigravity"),
+		} {
+			patterns = append(patterns, filepath.Join(root, "conversations", "*.db"))
+		}
+	}
+	return Collector{
+		Agent: "antigravity",
+		List:  func() ([]Source, error) { return globDatabases("antigravity", patterns...) },
+		Parse: parseAntigravity,
+	}
+}
+
+// Antigravity keeps one SQLite database per conversation with protobuf blobs
+// and no published schema. Field numbers below were read from its data and
+// match Codeium's ModelUsageStats layout.
 const (
 	antigravityGenRequest       = 1  // gen_metadata: the request
 	antigravityGenUsage         = 4  // request: ModelUsageStats
@@ -91,21 +117,20 @@ type antigravityStep struct {
 	error   string
 }
 
-// readAntigravitySteps returns model response steps by index, and their indexes by
-// the message ID of their usage.
-func readAntigravitySteps(db *sql.DB) (map[int64]antigravityStep, map[string]int64, error) {
+// antigravitySteps returns model response steps by index, and their indexes
+// by the message ID of their usage.
+func antigravitySteps(db *sql.DB) (map[int64]antigravityStep, map[string]int64, error) {
 	rows, err := db.Query("SELECT idx, metadata, error_details FROM steps WHERE step_type = ?", antigravityStepTypeResponse)
 	if err != nil {
 		return nil, nil, err
 	}
-	defer rows.Close()
 	steps := map[int64]antigravityStep{}
 	byMessage := map[string]int64{}
-	for rows.Next() {
+	err = scanRows(rows, func() error {
 		var index int64
 		var metadata, details []byte
 		if err := rows.Scan(&index, &metadata, &details); err != nil {
-			return nil, nil, err
+			return err
 		}
 		step := antigravityStep{
 			created: pbMillis(pbBytes(metadata, antigravityStepCreated)),
@@ -117,29 +142,31 @@ func readAntigravitySteps(db *sql.DB) (map[int64]antigravityStep, map[string]int
 		if id := string(pbBytes(step.usage, antigravityUsageMessageID)); id != "" {
 			byMessage[id] = index
 		}
-	}
-	return steps, byMessage, rows.Err()
+		return nil
+	})
+	return steps, byMessage, err
 }
 
-// parseAntigravityDatabase reads gen_metadata, one row per model request, and dates
+// parseAntigravity reads gen_metadata, one row per model request, and dates
 // each request by its response step. Failed responses have no row there.
-func parseAntigravityDatabase(path string) ([]Event, error) {
-	db, err := openReadOnly(path)
+func parseAntigravity(path string) ([]event.Event, error) {
+	db, err := openDatabase(path)
 	if err != nil {
 		return nil, err
 	}
 	defer db.Close()
-	steps, stepsByMessage, err := readAntigravitySteps(db)
+	steps, stepsByMessage, err := antigravitySteps(db)
 	if err != nil {
 		return nil, err
 	}
 	conversation := strings.TrimSuffix(filepath.Base(path), ".db")
+	client := filepath.Base(filepath.Dir(filepath.Dir(path)))
 	var trajectory []byte
 	_ = db.QueryRow("SELECT data FROM trajectory_metadata_blob LIMIT 1").Scan(&trajectory)
 	project := strings.TrimPrefix(string(pbBytes(pbBytes(trajectory, antigravityWorkspace), 1)), "file://")
-	newEvent := func(id, model string, usage []byte) Event {
-		return Event{
-			Agent: "antigravity", ID: id, Model: model, Session: conversation, Project: project, Client: "agy", Source: path,
+	newEvent := func(id, model string, usage []byte) event.Event {
+		return event.Event{
+			Agent: "antigravity", ID: id, Model: model, Session: conversation, Project: project, Client: client, Source: path,
 			InputTokens:      pbVarint(usage, antigravityUsageInput),
 			CacheReadTokens:  pbVarint(usage, antigravityUsageCacheRead),
 			CacheWriteTokens: pbVarint(usage, antigravityUsageCacheWrite),
@@ -152,20 +179,19 @@ func parseAntigravityDatabase(path string) ([]Event, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var events []Event
+	var events []event.Event
 	modelNames := map[int64]string{}
 	responded := map[int64]bool{}
-	for rows.Next() {
+	err = scanRows(rows, func() error {
 		var index int64
 		var data []byte
 		if err := rows.Scan(&index, &data); err != nil {
-			return nil, err
+			return err
 		}
 		request := pbBytes(data, antigravityGenRequest)
 		usage := pbBytes(request, antigravityGenUsage)
 		if usage == nil {
-			continue
+			return nil
 		}
 		labels := map[string]string{}
 		for _, label := range pbRepeated(request, antigravityGenLabels) {
@@ -181,26 +207,27 @@ func parseAntigravityDatabase(path string) ([]Event, error) {
 		}
 		step, found := steps[stepIndex]
 		if !ok || !found {
-			continue
+			return nil
 		}
 		responded[stepIndex] = true
-		event := newEvent(cmp.Or(labels["request_id"], conversation+":"+strconv.FormatInt(index, 10)), model, usage)
-		event.Time = step.created
-		event.LatencyMS = pbMillis(pbBytes(request, antigravityGenLatency))
-		events = append(events, event)
-	}
-	if err := rows.Err(); err != nil {
+		e := newEvent(cmp.Or(labels["request_id"], conversation+":"+strconv.FormatInt(index, 10)), model, usage)
+		e.Time = step.created
+		e.LatencyMS = pbMillis(pbBytes(request, antigravityGenLatency))
+		events = append(events, e)
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
 	for index, step := range steps {
 		if responded[index] || step.error == "" {
 			continue
 		}
-		event := newEvent(conversation+":step:"+strconv.FormatInt(index, 10), modelNames[step.model], step.usage)
-		event.Time = step.created
-		event.Failed = true
-		event.Error = step.error
-		events = append(events, event)
+		e := newEvent(conversation+":step:"+strconv.FormatInt(index, 10), modelNames[step.model], step.usage)
+		e.Time = step.created
+		e.Failed = true
+		e.Error = step.error
+		events = append(events, e)
 	}
 	return events, nil
 }
