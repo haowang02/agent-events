@@ -1,3 +1,4 @@
+import { select } from "./controls.js";
 import { $, el, icon, tip, hideTip, copyButton, makeSortable } from "./dom.js";
 import {
   api, pref, savePref, state, rangeParams, int, usd, rate, latency, tps, percent, dateTimeLines, shortPath, projectName, agentTag,
@@ -186,15 +187,16 @@ export async function loadEvents() {
   renderEvents();
 }
 
-// Keeps the current value selectable even when the new range has no matches for it.
-function fillSelect(select, allLabel, options, label = (value) => value) {
-  const current = select.value;
+const filterSelects = {};
+
+// Keep an active filter selectable when its count drops to zero.
+function fillSelect(key, allLabel, options, label = (value) => value) {
+  const current = view.filters[key];
   const rows = current && !options.some((option) => option.value === current) ? [{ value: current, count: 0 }, ...options] : options;
-  select.replaceChildren(
-    el("option", { value: "", text: allLabel }),
-    ...rows.map((option) => el("option", { value: option.value, text: (label(option.value) || "（空）") + " · " + int(option.count) }))
-  );
-  select.value = current;
+  filterSelects[key].update([
+    { value: "", label: allLabel },
+    ...rows.map((option) => ({ value: option.value, label: label(option.value) || "（空）", detail: int(option.count) }))
+  ], current);
 }
 
 function header(columns) {
@@ -228,17 +230,12 @@ function header(columns) {
 function renderEvents() {
   hideTip();
   const { data, filters } = view;
-  fillSelect($("filter-model"), "全部模型", data.models);
-  fillSelect($("filter-project"), "全部项目", data.projects, shortPath);
+  fillSelect("model", "全部模型", data.models);
+  fillSelect("project", "全部项目", data.projects, shortPath);
   const counts = data.status_counts;
-  $("filter-status").replaceChildren(
-    ...[
-      ["", "全部结果", counts.all],
-      ["ok", "成功", counts.ok],
-      ["failed", "失败", counts.failed]
-    ].map(([value, label, count]) => el("option", { value, text: label + " · " + int(count) }))
-  );
-  $("filter-status").value = filters.status;
+  filterSelects.status.update([
+    ["", "全部结果", counts.all], ["ok", "成功", counts.ok], ["failed", "失败", counts.failed]
+  ].map(([value, label, count]) => ({ value, label, detail: int(count) })), filters.status);
   $("filter-clear").disabled = !Object.values(filters).some(Boolean);
 
   // A single agent makes the agent column redundant.
@@ -325,21 +322,26 @@ export function initEvents() {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(() => setFilters({ ...view.filters, q: event.target.value.trim() }), 300);
   });
-  for (const key of ["model", "project", "status"]) {
-    $("filter-" + key).addEventListener("change", (event) => setFilters({ ...view.filters, [key]: event.target.value }));
+  for (const [key, label] of [["model", "模型"], ["project", "项目"], ["status", "结果"]]) {
+    filterSelects[key] = select({
+      label, value: view.filters[key], options: [{ value: "", label: "全部" + label }], searchable: key !== "status",
+      onChange: (value) => setFilters({ ...view.filters, [key]: value })
+    });
+    $("filter-" + key).replaceChildren(filterSelects[key].element);
   }
   $("filter-clear").addEventListener("click", () => {
     $("filter-q").value = "";
-    $("filter-model").value = $("filter-project").value = "";
     setFilters(NO_FILTERS);
   });
-  $("page-size").value = String(view.limit);
-  $("page-size").addEventListener("change", (event) => {
-    view.limit = Number(event.target.value);
-    savePref("page-size", view.limit);
-    view.offset = 0;
-    loadEvents();
-  });
+  $("page-size").replaceChildren(select({
+    label: "每页条数", value: String(view.limit), options: [25, 50, 100, 200].map((count) => ({ value: String(count), label: `${count} 条/页` })),
+    onChange: (value) => {
+      view.limit = Number(value);
+      savePref("page-size", view.limit);
+      view.offset = 0;
+      loadEvents();
+    }
+  }).element);
   $("page-prev").addEventListener("click", () => {
     view.offset = Math.max(0, view.offset - view.limit);
     loadEvents();

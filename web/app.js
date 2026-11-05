@@ -1,7 +1,9 @@
-import { $, el, icon, tip, hideTip } from "./dom.js";
-import { savePref, state, int, agentColor, agentName, AGENTS, clockTime } from "./core.js";
+import { $, icon, svgEl, tip, hideTip } from "./dom.js";
+import { savePref, state, clockTime, int, agentName, AGENTS } from "./core.js";
+import { initRange } from "./date-range.js";
+import { select } from "./controls.js";
 import { initEvents, loadEvents, resetEventPage } from "./events.js";
-import { loadAnalysis, renderAnalysis } from "./analysis.js";
+import { initAnalysis, loadAnalysis, renderAnalysis } from "./analysis.js";
 import { initPrices, loadPrices } from "./prices.js";
 
 const TABS = { events: loadEvents, analysis: loadAnalysis, prices: loadPrices };
@@ -13,36 +15,24 @@ function reload() {
   });
 }
 
-// Agents with events, most first, and the selected one even when it has none.
+const agentPicker = select({ label: "Agent", className: "agent-select", onChange: (id) => {
+  state.agent = id;
+  savePref("agent", id);
+  reloadScope();
+} });
+
 function renderAgents() {
   const counts = state.server?.counts || {};
   const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
   const agents = Object.keys(AGENTS)
     .filter((id) => counts[id] > 0 || id === state.agent)
     .sort((a, b) => (counts[b] || 0) - (counts[a] || 0));
-  $("agent-switch").replaceChildren(
-    ...[["", "全部", total], ...agents.map((id) => [id, agentName(id), counts[id] || 0])].map(([id, name, count]) =>
-      el(
-        "button",
-        {
-          type: "button",
-          class: id === state.agent ? "active" : "",
-          "aria-pressed": String(id === state.agent),
-          onclick: () => {
-            if (id === state.agent) return;
-            state.agent = id;
-            savePref("agent", id);
-            resetEventPage();
-            renderAgents();
-            reload();
-          }
-        },
-        id && el("i", { class: "agent-dot", style: { "--dot": agentColor(id) } }),
-        name,
-        el("span", { class: "count", text: int(count) })
-      )
-    )
-  );
+  agentPicker.update(["", ...agents].map((id) => ({
+    value: id,
+    label: id ? agentName(id) : "全部 Agent",
+    detail: int(id ? counts[id] : total),
+    icon: () => svgEl("svg", { class: "agent-icon", "aria-hidden": "true" }, svgEl("use", { href: `agents.svg#${id || "all"}` }))
+  })), state.agent);
 }
 
 function renderSyncStatus() {
@@ -80,44 +70,6 @@ function selectTab(tab) {
   if (state.server) reload();
 }
 
-const toLocalInput = (iso) => {
-  const at = new Date(iso);
-  return new Date(at.getTime() - at.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-};
-
-function initRange() {
-  const mode = $("range-mode");
-  const showCustom = () => {
-    const custom = state.range.mode === "custom";
-    $("range-custom").classList.toggle("hidden", !custom);
-    if (custom) {
-      $("range-from").value = toLocalInput(state.range.from);
-      $("range-to").value = toLocalInput(state.range.to);
-    }
-  };
-  const apply = (range) => {
-    state.range = range;
-    savePref("range", range);
-    resetEventPage();
-    showCustom();
-    reload();
-  };
-  mode.value = state.range.mode;
-  mode.addEventListener("change", () => {
-    if (mode.value !== "custom") return apply({ mode: mode.value });
-    const now = Date.now();
-    apply({ mode: "custom", from: new Date(now - 7 * 86400000).toISOString(), to: new Date(now).toISOString() });
-  });
-  for (const id of ["range-from", "range-to"]) {
-    $(id).addEventListener("change", () => {
-      const from = new Date($("range-from").value);
-      const to = new Date($("range-to").value);
-      if (from < to) apply({ mode: "custom", from: from.toISOString(), to: to.toISOString() });
-    });
-  }
-  showCustom();
-}
-
 function initTheme() {
   const button = $("theme-button");
   const render = () => button.replaceChildren(icon(document.documentElement.dataset.theme === "dark" ? "sun" : "moon"));
@@ -131,11 +83,17 @@ function initTheme() {
   });
 }
 
-Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
-Chart.defaults.font.size = 12;
+function reloadScope() {
+  resetEventPage();
+  reload();
+}
+
 initTheme();
-initRange();
+$("agent-picker").append(agentPicker.element);
+renderAgents();
+initRange(reloadScope);
 initEvents();
+initAnalysis();
 initPrices();
 for (const button of document.querySelectorAll("[data-tab]")) button.addEventListener("click", () => selectTab(button.dataset.tab));
 selectTab(state.tab);

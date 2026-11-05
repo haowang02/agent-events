@@ -41,49 +41,131 @@ func TestResolvePrice(t *testing.T) {
 	c, err := parseCatalog([]byte(`{
 		"models": {"anthropic/claude-x": {}, "deepseek/deepseek-v9-flash-1017": {}, "google/gemini-4-argon": {}},
 		"providers": {
-			"anthropic": {"models": {"claude-x": {"canonical_model_id": "anthropic/claude-x", "cost": {"input": 3, "output": 15}}}},
+			"anthropic": {"models": {
+				"claude-x": {"cost": {"input": 3, "output": 15}},
+				"sonnet-medium": {"canonical_model_id": "anthropic/claude-x-medium", "cost": {"input": 5, "output": 25}},
+				"claude-x-low": {"cost": {"input": 3, "output": 15, "input_audio": 9}}
+			}},
 			"deepseek": {"models": {"deepseek-flash": {"canonical_model_id": "deepseek/deepseek-v9-flash-1017", "cost": {"input": 0.15, "output": 0.6}}}},
-			"google": {"models": {"gemini-4-argon": {"cost": {"input": 2, "output": 10}}}},
+			"google": {"models": {
+				"gemini-4-argon": {"cost": {"input": 2, "output": 10}},
+				"gemini-4-argon-trial": {"cost": {"input": 0, "output": 0}}
+			}},
 			"openai": {"models": {"gpt-5.4": {"cost": {"input": 2.5, "output": 15}}, "gpt-5.6-luna": {"cost": {"input": 0.2, "output": 1.2}}}},
 			"reseller": {"models": {
 				"claude-x": {"canonical_model_id": "anthropic/claude-x", "cost": {"input": 1, "output": 5}},
 				"free-flash": {"canonical_model_id": "deepseek/deepseek-v9-flash-1017", "cost": {"input": 0, "output": 0}},
-				"open-y": {"cost": {"input": 1, "output": 2}}
+				"open-y": {"cost": {"input": 1, "output": 2}},
+				"claude-x-high": {"cost": {"input": 1, "output": 2}}
 			}},
-			"other": {"models": {"open-y": {"id": "vendor/open-y", "cost": {"input": 1, "output": 3}}}}
+			"other": {"models": {
+				"open-y": {"id": "vendor/open-y", "cost": {"input": 1, "output": 3}},
+				"claude-x-high": {"cost": {"input": 1, "output": 3}}
+			}}
 		}
 	}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := &Pricer{custom: map[string]Rates{}, resolved: map[string]*Price{}}
+	p := &Pricer{}
 	p.setCatalog(c, time.Now())
 	now := time.Now().UnixMilli()
 	for _, test := range []struct {
 		model string
 		at    int64
 		want  string
+		as    string
 	}{
-		{"Proxy/Claude-X", now, "anthropic/claude-x"},              // The creator's listing beats a reseller's.
-		{"DeepSeek-V9-Flash-1017", now, "deepseek/deepseek-flash"}, // The creator lists the canonical model under another ID.
-		{"free-flash", now, "reseller/free-flash"},                 // A reseller's own model keeps its price.
-		{"gemini-4-argon-trial", now, "google/gemini-4-argon"},
-		{"codex-auto-review", day("2026-07-29"), "openai/gpt-5.4"},
-		{"codex-auto-review", day("2026-07-30"), "openai/gpt-5.6-luna"},
-		{"open-y", now, ""}, // Resellers disagree.
+		{"Proxy/Claude-X", now, "anthropic/claude-x", ""},
+		{"DeepSeek-V9-Flash-1017", now, "deepseek/deepseek-flash", ""},
+		{"free-flash", now, "reseller/free-flash", ""},
+		{"gemini-4-argon-trial", now, "google/gemini-4-argon", "gemini-4-argon"},
+		{"codex-auto-review", day("2026-07-29"), "openai/gpt-5.4", "gpt-5.4"},
+		{"codex-auto-review", day("2026-07-30"), "openai/gpt-5.6-luna", "gpt-5.6-luna"},
+		{"open-y", now, "", ""},
+		{" Proxy/Gemini-4-Argon-A ", now, "google/gemini-4-argon", "gemini-4-argon"},
+		{"gemini-4-argon-z", now, "google/gemini-4-argon", "gemini-4-argon"},
+		{"gemini-4-argon-low", now, "google/gemini-4-argon", "gemini-4-argon"},
+		{"gemini-4-argon-medium", now, "google/gemini-4-argon", "gemini-4-argon"},
+		{"free-flash-high", now, "reseller/free-flash", "free-flash"},
+		{"claude-x-medium", now, "anthropic/sonnet-medium", ""},
+		{"claude-x-low", now, "", ""},
+		{"claude-x-high", now, "", ""},
+		{"open-y-high", now, "", ""},
+		{"missing-high", now, "", ""},
+		{"gemini-4-argon-nn", now, "", ""},
+		{"gemini-4-argon-1", now, "", ""},
+		{"claude-x-n", now, "", ""},
+		{"gemini-4-argon-high-low", now, "", ""},
 	} {
-		price := p.Resolve(test.model, test.at)
-		got := ""
-		if price != nil {
-			got = price.Provider + "/" + price.ModelID
-		}
-		if got != test.want {
-			t.Errorf("Resolve(%q, %d) = %q, want %q", test.model, test.at, got, test.want)
-		}
+		t.Run(test.model+"/"+time.UnixMilli(test.at).Format(time.DateOnly), func(t *testing.T) {
+			price := p.Resolve(test.model, test.at)
+			if test.want == "" {
+				if price != nil {
+					t.Fatalf("Resolve(%q) = %+v, want unpriced", test.model, price)
+				}
+				return
+			}
+			if price == nil || price.Source != "models.dev" || price.Provider+"/"+price.ModelID != test.want || price.As != test.as {
+				t.Fatalf("Resolve(%q) = %+v, want %s as %q", test.model, price, test.want, test.as)
+			}
+		})
 	}
 
-	p.SetCustom(map[string]Rates{"gemini-4-argon": {Input: 9, Output: 9}})
-	if price := p.Resolve("gemini-4-argon-trial", now); price == nil || price.Source != "custom" || price.As != "gemini-4-argon" || price.Input != 9 {
-		t.Errorf("alias does not follow the custom price of its target: %+v", price)
+	p.SetCustom(map[string]Rates{"gemini-4-argon": {Input: 9, Output: 9}, "claude-x": {Input: 9, Output: 9}})
+	for _, model := range []string{"gemini-4-argon-trial", "gemini-4-argon-n"} {
+		if price := p.Resolve(model, now); price == nil || price.Source != "custom" || price.As != "gemini-4-argon" || price.Input != 9 {
+			t.Errorf("Resolve(%q) did not follow the target's custom price: %+v", model, price)
+		}
+	}
+	if price := p.Resolve("claude-x-medium", now); price == nil || price.Source != "models.dev" || price.As != "" || price.Input != 5 {
+		t.Errorf("exact listing lost to base custom price: %+v", price)
+	}
+	for _, model := range []string{"claude-x-low", "claude-x-high"} {
+		if price := p.Resolve(model, now); price != nil {
+			t.Errorf("unpriced listing %q fell back to base custom price: %+v", model, price)
+		}
+	}
+}
+
+func TestPriceUpdates(t *testing.T) {
+	p := &Pricer{resolved: map[string]*Price{}}
+	now := time.Now().UnixMilli()
+	model, base := "claude-opus-5-5-medium", "claude-opus-5-5"
+	if price := p.Resolve(model, now); price != nil {
+		t.Fatalf("missing catalog and custom rates: %+v", price)
+	}
+	p.SetCustom(map[string]Rates{base: {Input: 9, Output: 10}})
+	if price := p.Resolve(model, now); price == nil || price.Source != "custom" || price.As != base || price.Input != 9 {
+		t.Fatalf("base custom rate: %+v", price)
+	}
+	p.SetCustom(map[string]Rates{base: {Input: 9, Output: 10}, model: {}})
+	if price := p.Resolve(model, now); price == nil || price.Source != "custom" || price.As != "" || price.Input != 0 {
+		t.Fatalf("original custom rate must override fallback, including zero: %+v", price)
+	}
+	p.SetCustom(nil)
+	if price := p.Resolve(model, now); price != nil {
+		t.Fatalf("removed custom rates stayed cached: %+v", price)
+	}
+	for _, catalogJSON := range []string{
+		`{"providers":{"anthropic":{"models":{"claude-opus-5-5":{"cost":{"input":5,"output":25}}}}}}`,
+		`{"providers":{"anthropic":{"models":{"claude-opus-5-5-medium":{"cost":{"input":7,"output":35}}}}}}`,
+	} {
+		c, err := parseCatalog([]byte(catalogJSON))
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.setCatalog(c, time.Now())
+		price := p.Resolve(model, now)
+		if price == nil || price.ModelID != c.listings[0].ModelID || price.Input != c.listings[0].Rates.Input {
+			t.Fatalf("catalog refresh did not replace cached price: %+v", price)
+		}
+		wantAs := ""
+		if price.ModelID == base {
+			wantAs = base
+		}
+		if price.As != wantAs {
+			t.Fatalf("catalog refresh: As = %q, want %q", price.As, wantAs)
+		}
 	}
 }

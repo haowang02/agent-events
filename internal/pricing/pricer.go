@@ -43,6 +43,25 @@ func aliasTarget(key string, at int64) string {
 	return ""
 }
 
+// fallbackTarget removes one known variant suffix. The candidate must resolve
+// on its own; suffixes are never stripped repeatedly.
+func fallbackTarget(model string) string {
+	key := referenceKey(model)
+	last := strings.LastIndexByte(key, '-')
+	if last < 0 {
+		return ""
+	}
+	base, suffix := key[:last], key[last+1:]
+	switch suffix {
+	case "low", "medium", "high":
+		return base
+	}
+	if strings.HasPrefix(base, "gemini-") && len(suffix) == 1 && suffix[0] >= 'a' && suffix[0] <= 'z' {
+		return base
+	}
+	return ""
+}
+
 func ModelKey(model string) string { return strings.ToLower(strings.TrimSpace(model)) }
 
 type CatalogStatus struct {
@@ -51,8 +70,8 @@ type CatalogStatus struct {
 	Error     string    `json:"error,omitempty"`
 }
 
-// Pricer resolves model prices: a custom price, else the price of the model
-// it is an alias of, else the models.dev reference price.
+// Pricer resolves custom prices, explicit aliases, and models.dev reference
+// prices, then falls back to known model variants when the full name is absent.
 type Pricer struct {
 	catalogPath string
 
@@ -112,12 +131,9 @@ func (p *Pricer) Stale() bool {
 // milliseconds, or nil when it is unpriced.
 func (p *Pricer) Resolve(model string, at int64) *Price {
 	key := ModelKey(model)
-	p.mu.RLock()
-	target := ""
-	if _, ok := p.custom[key]; !ok {
-		target = aliasTarget(key, at)
-	}
+	target := aliasTarget(key, at)
 	cacheKey := key + "\x00" + target
+	p.mu.RLock()
 	price, ok := p.resolved[cacheKey]
 	p.mu.RUnlock()
 	if ok {
@@ -134,22 +150,35 @@ func (p *Pricer) resolve(key, target string) *Price {
 	if rates, ok := p.custom[key]; ok {
 		return &Price{Rates: rates, Source: "custom"}
 	}
-	if target != "" {
-		price := p.resolve(target, "")
-		if price != nil {
-			aliased := *price
-			aliased.As = target
-			price = &aliased
+	if target == "" {
+		if price, found := p.lookup(key); found {
+			return price
 		}
-		return price
+		target = fallbackTarget(key)
 	}
-	if p.catalog == nil {
+	if target == "" {
 		return nil
 	}
-	if listing, ok := p.catalog.match(key); ok {
-		return &Price{Rates: *listing.Rates, Source: "models.dev", Provider: listing.Provider, ModelID: listing.ModelID}
+	price, _ := p.lookup(target)
+	if price != nil {
+		price.As = target
 	}
-	return nil
+	return price
+}
+
+// lookup distinguishes an absent model from a listed but unpriced one.
+func (p *Pricer) lookup(key string) (*Price, bool) {
+	if rates, ok := p.custom[key]; ok {
+		return &Price{Rates: rates, Source: "custom"}, true
+	}
+	if p.catalog == nil {
+		return nil, false
+	}
+	listing, found := p.catalog.match(key)
+	if listing.Rates == nil {
+		return nil, found
+	}
+	return &Price{Rates: *listing.Rates, Source: "models.dev", Provider: listing.Provider, ModelID: listing.ModelID}, true
 }
 
 func (p *Pricer) Search(query string, limit int) []ReferencePrice {

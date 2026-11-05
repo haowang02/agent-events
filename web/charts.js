@@ -1,8 +1,36 @@
-// Chart.js plumbing shared by the analysis cards.
-import { $, el } from "./dom.js";
+// Charts, legends and sparklines for the analysis cards.
+import { $, el, svgEl } from "./dom.js";
 import { cssVar } from "./core.js";
 
 const charts = {};
+
+Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
+Chart.defaults.font.size = 12;
+
+// Round the whole stack, including when its top segment is only a pixel tall.
+export const roundedStacks = {
+  id: "roundedStacks",
+  beforeDatasetsDraw(chart) {
+    const stacks = new Map();
+    for (const meta of chart.getSortedVisibleDatasetMetas()) {
+      for (const bar of meta.data) {
+        if (!(bar.height > 0)) continue;
+        const stack = stacks.get(bar.x) || { x: bar.x - bar.width / 2, width: bar.width, top: Infinity, bottom: -Infinity };
+        stack.top = Math.min(stack.top, bar.y, bar.base);
+        stack.bottom = Math.max(stack.bottom, bar.y, bar.base);
+        stacks.set(bar.x, stack);
+      }
+    }
+    const { ctx } = chart;
+    ctx.save();
+    ctx.beginPath();
+    for (const { x, width, top, bottom } of stacks.values()) ctx.roundRect(x, top, width, bottom - top, [6, 6, 0, 0]);
+    ctx.clip();
+  },
+  afterDatasetsDraw(chart) {
+    chart.ctx.restore();
+  }
+};
 
 // drawChart updates the chart on a canvas in place, so data pushed while the
 // page is open does not replay the entry animation. With empty, the canvas
@@ -52,8 +80,8 @@ export function timeSeriesOptions({ tooltip, y, stacked = false }) {
     interaction: { mode: "index", intersect: false },
     plugins: { legend: { display: false }, tooltip: tooltipStyle(tooltip) },
     scales: {
-      x: { stacked, grid: { display: false }, border: { color: grid }, ticks: { color: text, maxRotation: 0, autoSkip: true, maxTicksLimit: 10 } },
-      y: { stacked, grid: { color: grid }, border: { display: false }, ...y, ticks: { color: text, maxTicksLimit: 6, ...y.ticks } }
+      x: { stacked, grid: { display: false }, border: { display: false }, ticks: { color: text, padding: 8, maxRotation: 0, autoSkip: true, maxTicksLimit: 10 } },
+      y: { stacked, grid: { color: grid, drawTicks: false }, border: { display: false, dash: [3, 5] }, ...y, ticks: { color: text, padding: 10, maxTicksLimit: 5, ...y.ticks } }
     }
   };
 }
@@ -95,40 +123,39 @@ export function toggleLegend(chartId, datasets, hidden) {
   );
 }
 
+let sparklineID = 0;
+
 // Counts start from zero; with fit, rates span their own range instead.
 export function sparkline(values, color, { fit = false } = {}) {
-  const canvas = el("canvas", { class: "summary-spark", "aria-hidden": "true" });
-  requestAnimationFrame(() => {
-    const { clientWidth: width, clientHeight: height } = canvas;
-    if (!width || !height || !values.length) return;
-    const ratio = devicePixelRatio || 1;
-    canvas.width = width * ratio;
-    canvas.height = height * ratio;
-    const context = canvas.getContext("2d");
-    context.scale(ratio, ratio);
-    const points = values.length > 1 ? values : [values[0], values[0]];
-    const maximum = Math.max(...points);
-    const minimum = fit ? Math.min(...points) : Math.min(0, ...points);
-    const span = maximum - minimum || 1;
-    const pad = 4;
-    context.beginPath();
-    points.forEach((value, index) => {
-      const x = (index * width) / (points.length - 1);
-      const y = pad + ((maximum - value) * (height - pad * 2)) / span;
-      if (index) context.lineTo(x, y);
-      else context.moveTo(x, y);
-    });
-    context.lineWidth = 2;
-    context.lineJoin = "round";
-    context.lineCap = "round";
-    context.strokeStyle = color;
-    context.stroke();
-    context.lineTo(width, height);
-    context.lineTo(0, height);
-    context.closePath();
-    context.globalAlpha = 0.1;
-    context.fillStyle = color;
-    context.fill();
+  const width = 320, height = 56, top = 6, bottom = 48;
+  const svg = svgEl("svg", { class: "summary-spark", viewBox: `0 0 ${width} ${height}`, preserveAspectRatio: "none", "aria-hidden": "true", color });
+  if (!values.length) return svg;
+
+  const points = values.length > 1 ? values : [values[0], values[0]];
+  const maximum = Math.max(...points);
+  const minimum = fit ? Math.min(...points) : Math.min(0, ...points);
+  const span = maximum - minimum;
+  const step = width / (points.length - 1);
+  const ys = points.map((value) => span ? bottom - ((value - minimum) * (bottom - top)) / span : fit ? height / 2 : bottom);
+  const deltas = ys.slice(1).map((y, index) => y - ys[index]);
+  // Monotone tangents keep the curve within each pair of measured values.
+  const slopes = ys.map((_, index) => {
+    const before = deltas[Math.max(0, index - 1)];
+    const after = deltas[Math.min(index, deltas.length - 1)];
+    return before * after > 0 ? (2 * before * after) / (before + after) : 0;
   });
-  return canvas;
+  let path = `M0,${ys[0]}`;
+  for (let i = 1; i < ys.length; i++) {
+    const x = i * step;
+    path += ` C${x - step * 2 / 3},${ys[i - 1] + slopes[i - 1] / 3} ${x - step / 3},${ys[i] - slopes[i] / 3} ${x},${ys[i]}`;
+  }
+  const gradient = `spark-${++sparklineID}`;
+  svg.innerHTML = `
+    <defs><linearGradient id="${gradient}" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="currentColor" stop-opacity=".22"/>
+      <stop offset="1" stop-color="currentColor" stop-opacity=".02"/>
+    </linearGradient></defs>
+    <path d="${path} L${width},${height} L0,${height} Z" fill="url(#${gradient})"/>
+    <path d="${path}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" vector-effect="non-scaling-stroke"/>`;
+  return svg;
 }

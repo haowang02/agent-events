@@ -1,9 +1,7 @@
+import { select, segmented } from "./controls.js";
 import { $, el, hideTip } from "./dom.js";
 import { api, pref, savePref, state, rangeParams, int, tokens, usd, latency, percent, shortPath, projectName, agentName, agentSlot, seriesColor, cssVar } from "./core.js";
-import { drawChart, tooltipStyle, timeSeriesOptions, legend, toggleLegend, sparkline } from "./charts.js";
-
-const STATUS_GOOD = "#0ca30c";
-const STATUS_CRITICAL = "#d03b3b";
+import { drawChart, tooltipStyle, timeSeriesOptions, legend, toggleLegend, sparkline, roundedStacks } from "./charts.js";
 
 const view = {
   data: null,
@@ -42,16 +40,6 @@ function bucketLabel(ms, bucket) {
   const pad = (n) => String(n).padStart(2, "0");
   const day = `${pad(at.getMonth() + 1)}-${pad(at.getDate())}`;
   return bucket === "hour" ? `${day} ${pad(at.getHours())}:00` : day;
-}
-
-function segmented(label, options, active, onSelect) {
-  return el(
-    "div",
-    { class: "segmented small", role: "group", "aria-label": label },
-    options.map(([value, text]) =>
-      el("button", { type: "button", class: value === active ? "active" : "", "aria-pressed": String(value === active), text, onclick: () => onSelect(value) })
-    )
-  );
 }
 
 function summaryLine(label, value) {
@@ -125,9 +113,9 @@ const TREND_METRICS = {
     label: "Token",
     format: tokens,
     series: () => [
-      ["非缓存输入", (p) => p.input_tokens, seriesColor(1)],
-      ["缓存读取", (p) => p.cache_read_tokens, seriesColor(2)],
-      ["缓存写入", (p) => p.cache_write_tokens, seriesColor(3)],
+      ["非缓存输入", (p) => p.input_tokens, seriesColor(3)],
+      ["缓存读取", (p) => p.cache_read_tokens, seriesColor(1)],
+      ["缓存写入", (p) => p.cache_write_tokens, seriesColor(7)],
       ["输出", (p) => p.output_tokens, seriesColor(4)]
     ]
   },
@@ -135,57 +123,55 @@ const TREND_METRICS = {
     label: "请求",
     format: int,
     series: () => [
-      ["成功", (p) => p.requests - p.failed, STATUS_GOOD],
-      ["失败", (p) => p.failed, STATUS_CRITICAL]
+      ["成功", (p) => p.requests - p.failed, seriesColor(3)],
+      ["失败", (p) => p.failed, cssVar("--bad-text")]
     ]
   },
   cost: {
     label: "费用",
     format: usd,
     series: () => [
-      ["非缓存输入", (p) => p.cost_input, seriesColor(1)],
-      ["缓存读取", (p) => p.cost_cache_read, seriesColor(2)],
-      ["缓存写入", (p) => p.cost_cache_write, seriesColor(3)],
+      ["非缓存输入", (p) => p.cost_input, seriesColor(3)],
+      ["缓存读取", (p) => p.cost_cache_read, seriesColor(1)],
+      ["缓存写入", (p) => p.cost_cache_write, seriesColor(7)],
       ["输出", (p) => p.cost_output, seriesColor(4)]
     ]
   }
 };
+
+const trendSelect = segmented({ label: "趋势指标", onChange: (value) => {
+  view.trendMetric = value;
+  savePref("trend-metric", value);
+  renderTrend(view.data);
+} });
 
 function renderTrend({ trend, bucket }) {
   const metricKey = TREND_METRICS[view.trendMetric] ? view.trendMetric : "tokens";
   const metric = TREND_METRICS[metricKey];
   const hidden = (view.hiddenSeries[metricKey] ||= new Set());
   const surface = cssVar("--surface-strong");
-  // A 2px surface gap separates stacked segments; only the top one is rounded.
   const datasets = metric
     .series()
     .filter(([, pick]) => trend.some((point) => pick(point) > 0))
-    .map(([label, pick, color], index, all) => ({
+    .map(([label, pick, color]) => ({
       label,
       data: trend.map(pick),
       hidden: hidden.has(label),
-      backgroundColor: color,
-      borderColor: surface,
-      borderWidth: { top: index < all.length - 1 ? 2 : 0 },
-      borderSkipped: "bottom",
-      borderRadius: index === all.length - 1 ? { topLeft: 4, topRight: 4 } : 0,
-      maxBarThickness: 24,
-      categoryPercentage: 0.8,
+      backgroundColor: `color-mix(in srgb, ${color} 85%, ${surface})`,
+      hoverBackgroundColor: color,
+      borderWidth: 0,
+      maxBarThickness: 56,
+      categoryPercentage: 0.72,
       barPercentage: 0.9
     }));
-  $("trend-controls").replaceChildren(
-    segmented("趋势指标", Object.entries(TREND_METRICS).map(([key, item]) => [key, item.label]), metricKey, (value) => {
-      view.trendMetric = value;
-      savePref("trend-metric", value);
-      renderTrend(view.data);
-    })
-  );
+  trendSelect.update(Object.entries(TREND_METRICS).map(([value, item]) => ({ value, label: item.label })), metricKey);
   $("trend-legend").replaceChildren(datasets.length > 1 ? toggleLegend("trend-chart", datasets, hidden) : "");
   const sum = (items) => items.reduce((total, item) => total + Number(item.raw || 0), 0);
   drawChart(
     "trend-chart",
     {
       type: "bar",
+      plugins: [roundedStacks],
       data: { labels: trend.map((point) => bucketLabel(point.time, bucket)), datasets },
       options: timeSeriesOptions({
         stacked: true,
@@ -195,7 +181,7 @@ function renderTrend({ trend, bucket }) {
             footer: (items) => (items.length > 1 ? "合计：" + metric.format(sum(items)) : "")
           }
         },
-        y: { beginAtZero: true, ticks: { callback: (value) => metric.format(value) } }
+        y: { beginAtZero: true, grace: "12%", ticks: { precision: metricKey === "requests" ? 0 : undefined, callback: (value) => metric.format(value) } }
       })
     },
     datasets.length ? "" : "所选范围内没有数据"
@@ -208,6 +194,19 @@ const DISTRIBUTION_METRICS = {
   requests: { label: "请求", option: "请求占比", format: (row) => int(row.requests) },
   cost: { label: "费用", option: "费用占比", format: (row) => usd(row.cost) }
 };
+const dimensionSelect = segmented({ label: "分布维度", onChange: (value) => {
+  view.dimension = value;
+  savePref("distribution-dimension", value);
+  renderDistribution(view.data);
+} });
+const distributionSelect = select({
+  label: "分布指标",
+  onChange: (value) => {
+    view.metric = value;
+    savePref("distribution-metric", value);
+    renderDistribution(view.data);
+  }
+});
 const USAGE_FIELDS = ["requests", "failed", "input_tokens", "cache_read_tokens", "cache_write_tokens", "output_tokens", "total_tokens", "cost"];
 
 function dimensionLabel(dimension, key) {
@@ -249,29 +248,8 @@ function renderDistribution(data) {
   const dimension = dimensions[view.dimension] ? view.dimension : "models";
   const metric = DISTRIBUTION_METRICS[view.metric] ? view.metric : "total_tokens";
   const rows = distributionRows(data.distribution[dimension], dimension, metric).filter((row) => row.requests > 0);
-  $("distribution-controls").replaceChildren(
-    segmented("分布维度", Object.entries(dimensions), dimension, (value) => {
-      view.dimension = value;
-      savePref("distribution-dimension", value);
-      renderDistribution(view.data);
-    }),
-    el(
-      "span",
-      { class: "native-select" },
-      el(
-        "select",
-        {
-          "aria-label": "分布指标",
-          onchange: (event) => {
-            view.metric = event.target.value;
-            savePref("distribution-metric", view.metric);
-            renderDistribution(view.data);
-          }
-        },
-        Object.entries(DISTRIBUTION_METRICS).map(([value, item]) => el("option", { value, text: item.option, selected: value === metric }))
-      )
-    )
-  );
+  dimensionSelect.update(Object.entries(dimensions).map(([value, label]) => ({ value, label })), dimension);
+  distributionSelect.update(Object.entries(DISTRIBUTION_METRICS).map(([value, item]) => ({ value, label: item.option })), metric);
   $("distribution-list").replaceChildren(
     ...rows.map((row) =>
       el(
@@ -352,26 +330,14 @@ function speedAxis(points) {
   return { min: Math.max(0, Math.floor(low / step) * step), max: Math.ceil(high / step) * step, ticks: { ...ticks, stepSize: step } };
 }
 
+const speedSelect = select({
+  label: "速度趋势模型", searchable: true,
+  onChange: (value) => { view.speedModel = value; loadAnalysis(); }
+});
+
 function renderSpeed({ speed_models: models, speed_model: model, speed: stats, speed_trend: points, bucket }) {
-  $("speed-controls").replaceChildren(
-    models.length
-      ? el(
-          "span",
-          { class: "native-select" },
-          el(
-            "select",
-            {
-              "aria-label": "速度趋势模型",
-              onchange: (event) => {
-                view.speedModel = event.target.value;
-                loadAnalysis();
-              }
-            },
-            models.map((option) => el("option", { value: option.value, text: `${option.value || "未知模型"} · ${int(option.count)}`, selected: option.value === model }))
-          )
-        )
-      : ""
-  );
+  $("speed-controls").classList.toggle("hidden", !models.length);
+  speedSelect.update(models.map((option) => ({ value: option.value, label: option.value || "未知模型", detail: int(option.count) })), model);
   const colors = { median: seriesColor(2), box: seriesColor(1), whisker: cssVar("--text-tertiary") };
   const sampled = stats.samples > 0;
   $("speed-legend").replaceChildren(
@@ -438,4 +404,10 @@ function renderSpeed({ speed_models: models, speed_model: model, speed: stats, s
     },
     !models.length ? "所选范围内没有带耗时的成功请求" : sampled ? "" : "该模型没有可用样本"
   );
+}
+
+export function initAnalysis() {
+  $("trend-controls").append(trendSelect.element);
+  $("distribution-controls").append(dimensionSelect.element, distributionSelect.element);
+  $("speed-controls").append(speedSelect.element);
 }

@@ -139,14 +139,14 @@ func parseCatalog(raw []byte) (*catalog, error) {
 
 // referenceKey drops a namespace such as "deepseek/" and case from a model ID.
 func referenceKey(id string) string {
-	key := strings.ToLower(strings.TrimSpace(id))
+	key := ModelKey(id)
 	return key[strings.LastIndex(key, "/")+1:]
 }
 
 // match prices a model the way its creator does: the creator's listing of
 // that model ID, else the creator's listing of the canonical model with that
 // name. A model without a creator listing takes the price that every listing
-// agrees on. Conflicting candidates leave the model unpriced.
+// agrees on. A found model with conflicting or unsupported prices has nil Rates.
 func (c *catalog) match(model string) (ReferencePrice, bool) {
 	key := referenceKey(model)
 	listings := c.byModel[key]
@@ -155,12 +155,14 @@ func (c *catalog) match(model string) (ReferencePrice, bool) {
 		if len(candidates) == 0 {
 			continue
 		}
+		listing := candidates[0]
 		for _, candidate := range candidates {
-			if candidate.Rates == nil || !candidate.Rates.equal(candidates[0].Rates) {
-				return ReferencePrice{}, false
+			if candidate.Rates == nil || !candidate.Rates.equal(listing.Rates) {
+				listing.Rates = nil
+				break
 			}
 		}
-		return candidates[0], true
+		return listing, true
 	}
 	return ReferencePrice{}, false
 }
