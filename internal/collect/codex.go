@@ -115,6 +115,25 @@ type codexPayload struct {
 	Usage      codexUsage `json:"usage"`
 }
 
+// Structured sources describe thread roles; originator identifies the client.
+func (p *codexPayload) sessionKind() string {
+	var object map[string]json.RawMessage
+	if json.Unmarshal(p.Source, &object) == nil {
+		for key := range object {
+			return key
+		}
+	}
+	switch p.Originator {
+	case "codex-tui":
+		return "cli"
+	case "codex_exec":
+		return "exec"
+	}
+	var source string
+	json.Unmarshal(p.Source, &source)
+	return source
+}
+
 var (
 	codexTypePrefix  = []byte(`"type":"`)
 	codexUserMessage = []byte(`"type":"UserMessage"`)
@@ -213,7 +232,7 @@ func parseCodex(path string) ([]event.Event, error) {
 		case "session_meta":
 			session, project, version = payload.ID, payload.CWD, payload.CLIVersion
 			client, provider = payload.Originator, payload.ModelProvider
-			kind = codexSourceKind(payload.Source)
+			kind = payload.sessionKind()
 		case "turn_context":
 			model, effort = payload.Model, payload.Effort
 			if effort == "" && payload.CollaborationMode != nil {
@@ -291,20 +310,4 @@ func codexTier(serviceTier string) string {
 		return "priority"
 	}
 	return serviceTier
-}
-
-// codexSourceKind names where a session came from: "cli", "exec", "vscode",
-// or "subagent" for a thread spawned by another one.
-func codexSourceKind(raw json.RawMessage) string {
-	var name string
-	if json.Unmarshal(raw, &name) == nil {
-		return name
-	}
-	var object map[string]json.RawMessage
-	if json.Unmarshal(raw, &object) == nil {
-		for key := range object {
-			return key
-		}
-	}
-	return ""
 }

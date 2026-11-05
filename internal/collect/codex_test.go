@@ -23,7 +23,7 @@ func compress(t *testing.T, path string) string {
 
 func TestParseCodexRecords(t *testing.T) {
 	path := compress(t, writeFile(t, "rollout-1.jsonl",
-		`{"timestamp":"2026-10-26T05:00:00.000Z","type":"session_meta","payload":{"id":"thread","cwd":"/p","cli_version":"1.0","originator":"codex-tui","model_provider":"openai","source":"cli"}}`,
+		`{"timestamp":"2026-10-26T05:00:00.000Z","type":"session_meta","payload":{"id":"thread","cwd":"/p","cli_version":"1.0","originator":"codex-tui","model_provider":"openai","source":"vscode"}}`,
 		`{"timestamp":"2026-10-26T05:00:00.000Z","type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"service_tier":"priority"}}}`,
 		`{"timestamp":"2026-10-26T05:00:00.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}`,
 		`{"timestamp":"2026-10-26T05:00:01.000Z","type":"turn_context","payload":{"turn_id":"t1","model":"gpt-x","effort":"high"}}`,
@@ -46,6 +46,9 @@ func TestParseCodexRecords(t *testing.T) {
 	}
 	start := parseTime("2026-10-26T05:00:00.000Z")
 	first, second, third := events[0], events[1], events[2]
+	if first.Kind != "cli" || first.Client != "codex-tui" {
+		t.Errorf("session metadata: kind=%q client=%q", first.Kind, first.Client)
+	}
 	if first.Time != start+2000 || first.LatencyMS != 8000 || first.TTFTMS != 3000 {
 		t.Errorf("first request: time=%d latency=%d ttft=%d", first.Time-start, first.LatencyMS, first.TTFTMS)
 	}
@@ -65,7 +68,7 @@ func TestParseCodexRecords(t *testing.T) {
 // parent's events under the fork's timestamp.
 func TestParseCodexTokenCounts(t *testing.T) {
 	parent := writeFile(t, "rollout-parent.jsonl",
-		`{"timestamp":"2026-05-01T00:00:00.000Z","type":"session_meta","payload":{"id":"parent"}}`,
+		`{"timestamp":"2026-05-01T00:00:00.000Z","type":"session_meta","payload":{"id":"parent","source":"cli"}}`,
 		`{"timestamp":"2026-05-01T00:00:00.000Z","type":"turn_context","payload":{"model":"gpt-x"}}`,
 		`{"timestamp":"2026-05-01T00:00:01.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":10},"last_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":10}}}}`,
 		`{"timestamp":"2026-05-01T00:00:02.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":10},"last_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":10}}}}`,
@@ -73,7 +76,7 @@ func TestParseCodexTokenCounts(t *testing.T) {
 		`{"timestamp":"2026-05-01T00:00:04.000Z","type":"event_msg","payload":{"type":"token_count","info":null}}`,
 	)
 	child := writeFile(t, "rollout-child.jsonl",
-		`{"timestamp":"2026-05-02T00:00:00.000Z","type":"session_meta","payload":{"id":"child"}}`,
+		`{"timestamp":"2026-05-02T00:00:00.000Z","type":"session_meta","payload":{"id":"child","originator":"codex-tui","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent","depth":1}}}}}`,
 		`{"timestamp":"2026-05-02T00:00:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":10},"last_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":10}}}}`,
 		`{"timestamp":"2026-05-02T00:00:09.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300,"cached_input_tokens":130,"output_tokens":20},"last_token_usage":{"input_tokens":50,"cached_input_tokens":10,"output_tokens":5}}}}`,
 	)
@@ -87,6 +90,9 @@ func TestParseCodexTokenCounts(t *testing.T) {
 	}
 	if len(parentEvents) != 2 || len(childEvents) != 2 {
 		t.Fatalf("got %d parent and %d child events, want 2 and 2", len(parentEvents), len(childEvents))
+	}
+	if parentEvents[0].Kind != "cli" || childEvents[0].Kind != "subagent" {
+		t.Errorf("session kinds: parent=%q child=%q", parentEvents[0].Kind, childEvents[0].Kind)
 	}
 	if delta := parentEvents[1]; delta.InputTokens != 50 || delta.CacheReadTokens != 100 || delta.OutputTokens != 5 {
 		t.Errorf("usage from cumulative totals: %+v", delta)
