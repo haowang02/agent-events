@@ -1,11 +1,7 @@
 import { $, el, icon } from "./dom.js";
 import { attachPopover } from "./controls.js";
-import { state, savePref, selectedRange } from "./core.js";
+import { state, savePref, selectedRange, RANGE_PRESETS as PRESETS, TIME_ZONE, dateText, hourMinute as timeText, rangeLabel } from "./core.js";
 
-const PRESETS = { today: "今天", yesterday: "昨天", "24h": "最近 24 小时", "7d": "最近 7 天", "30d": "最近 30 天", "90d": "最近 90 天", all: "全部时间" };
-const pad = (value) => String(value).padStart(2, "0");
-const dateText = (at) => `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`;
-const timeText = (at) => `${pad(at.getHours())}:${pad(at.getMinutes())}`;
 const monthStart = (at, offset = 0) => new Date(at.getFullYear(), at.getMonth() + offset, 1);
 const parseDate = (date, time) => {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{2}:\d{2}$/.test(time)) return null;
@@ -17,7 +13,7 @@ export function initRange(onChange) {
   let month, choosingEnd = false, hoverDay = "";
   const fields = {};
   const buttonLabel = el("span");
-  const button = el("button", { type: "button", class: "range-button", "aria-haspopup": "dialog" }, icon("calendar"), buttonLabel, el("i", { class: "select-chevron", "aria-hidden": "true" }));
+  const button = el("button", { type: "button", class: "range-button", "aria-haspopup": "dialog" }, icon("calendar"), buttonLabel, icon("chevron-down", { class: "select-chevron" }));
   const calendars = el("div", { class: "range-calendars" });
   const message = el("span", { class: "range-message", "aria-live": "polite" });
   const apply = el("button", { type: "button", class: "button primary", text: "应用范围", onclick: () => {
@@ -46,7 +42,7 @@ export function initRange(onChange) {
   }));
   const panel = el("div", { class: "range-panel", role: "dialog", "aria-label": "选择时间范围" }, shortcuts,
     el("div", { class: "range-editor" },
-      el("div", { class: "range-editor-heading" }, el("strong", { text: "自定义时间范围" }), el("span", { class: "muted small", text: Intl.DateTimeFormat().resolvedOptions().timeZone })),
+      el("div", { class: "range-editor-heading" }, el("strong", { text: "自定义时间范围" }), el("span", { class: "muted small", text: TIME_ZONE })),
       calendars, inputs,
       el("div", { class: "range-footer" }, message, el("button", { type: "button", class: "button", text: "取消", onclick: close }), apply)
     )
@@ -63,8 +59,7 @@ export function initRange(onChange) {
     onChange();
   }
   function renderLabel() {
-    const { mode, from, to } = state.range;
-    buttonLabel.textContent = PRESETS[mode] || `${dateText(new Date(from))} ${timeText(new Date(from))} — ${dateText(new Date(to))} ${timeText(new Date(to))}`;
+    buttonLabel.textContent = rangeLabel(state.range);
     button.setAttribute("aria-label", `时间范围：${buttonLabel.textContent}`);
   }
   function read() {
@@ -135,9 +130,9 @@ export function initRange(onChange) {
       }
       return el("section", { class: "calendar-month", "aria-label": title },
         el("div", { class: "calendar-heading" },
-          offset === 0 ? el("button", { type: "button", class: "icon-button", "aria-label": "上个月", onclick: () => shiftMonth(-1) }, icon("chevronLeft")) : el("span"),
+          offset === 0 ? el("button", { type: "button", class: "icon-button", "aria-label": "上个月", onclick: () => shiftMonth(-1) }, icon("chevron-left")) : el("span"),
           el("strong", { text: title }),
-          offset === 1 ? el("button", { type: "button", class: "icon-button", "aria-label": "下个月", onclick: () => shiftMonth(1) }, icon("chevronRight")) : el("span")
+          offset === 1 ? el("button", { type: "button", class: "icon-button", "aria-label": "下个月", onclick: () => shiftMonth(1) }, icon("chevron-right")) : el("span")
         ),
         el("div", { class: "calendar-weekdays", "aria-hidden": "true" }, ...["日", "一", "二", "三", "四", "五", "六"].map((text) => el("span", { text }))),
         el("div", { class: "calendar-grid" }, days)

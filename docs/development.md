@@ -12,7 +12,9 @@
 | `internal/server` | 定时采集、查询统计和 HTTP 接口 |
 | `web` | 网页界面，编译时嵌入二进制 |
 
-`web/app.js` 负责应用初始化、Agent 选择与页面调度，各页面分别放在 `events.js`、`analysis.js`、`prices.js`。`controls.js` 提供下拉框、分段切换和弹层交互，`date-range.js` 管理时间范围；DOM 工具和图表绘制分别放在 `dom.js`、`charts.js`。
+`web/app.js` 负责顶栏、主题、同步状态与页面调度，各页面分别放在 `events.js`、`analysis.js`、`prices.js`。请求事件页的列定义、详情弹窗、列设置、分页和时间分布条分别在 `event-fields.js`、`event-detail.js`、`column-settings.js`、`pager.js`、`timeline.js`；统计页的指标卡在 `summary.js`。`controls.js` 提供下拉框、分段切换、弹层和复制按钮，`tooltip.js` 提供悬停提示，`data-table.js` 提供前端排序的表格，`date-range.js` 管理时间范围；DOM 工具与 Lucide 图标、图表绘制分别放在 `dom.js`、`charts.js`。
+
+请求事件按快照分页：接口返回快照内最大的事件序号（`anchor`，即 SQLite 的 rowid），翻页和自动刷新沿用同一快照，之后保存的事件只计入 `newer`。停在第 1 页顶部且没有打开弹窗时，刷新会取最新快照并高亮新事件。
 
 ## 前端约定
 

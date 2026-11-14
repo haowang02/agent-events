@@ -2,38 +2,53 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Agent 请求事件</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%232563eb'/%3E%3Cpath d='M6 16l4-8 4 6 2-3 2 5' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
     <script>
-      document.documentElement.dataset.theme = localStorage.getItem("agent-events:theme") === "dark" ? "dark" : "light";
+      try {
+        const theme = localStorage.getItem("agent-events:theme");
+        document.documentElement.dataset.theme = theme === "dark" || theme === "light" ? theme : matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      } catch {
+        document.documentElement.dataset.theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      }
     </script>
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
     <div class="app-bg" aria-hidden="true"></div>
     <div class="wrap">
-      <header class="topbar">
-        <div id="agent-picker"></div>
-        <div class="tabs-bar card">
+      <header class="topbar card">
+        <div class="nav-start">
+          <span class="brand">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="6" /><path d="M6 16l4-8 4 6 2-3 2 5" /></svg>
+            <span>Agent Events</span>
+          </span>
           <div class="tabs" role="tablist" aria-label="页面">
-            <button type="button" role="tab" data-tab="events">请求事件</button>
-            <button type="button" role="tab" data-tab="analysis">统计分析</button>
-            <button type="button" role="tab" data-tab="prices">模型价格</button>
+            <button type="button" role="tab" data-tab="events" aria-controls="tab-events">请求事件<span id="events-count" class="tab-count hidden"></span></button>
+            <button type="button" role="tab" data-tab="analysis" aria-controls="tab-analysis">统计分析</button>
+            <button type="button" role="tab" data-tab="prices" aria-controls="tab-prices">模型价格</button>
           </div>
-          <div id="range-control" class="range-control"></div>
         </div>
-        <div class="topbar-actions">
-          <span id="sync-status" class="muted small" aria-live="polite"></span>
-          <button id="theme-button" class="icon-button" type="button" aria-label="切换主题"></button>
+        <div class="bar-tools">
+          <div id="agent-picker"></div>
+          <div id="range-control" class="range-control"></div>
+          <span id="sync-status" class="sync-chip"></span>
+          <div id="theme-control"></div>
         </div>
       </header>
 
+      <div id="notice" class="card notice hidden" role="alert"></div>
+
       <main>
-        <section id="tab-events" class="card table-card hidden" aria-labelledby="events-title">
+        <section id="tab-events" class="card table-card hidden" role="tabpanel" aria-labelledby="events-title">
           <div class="card-header">
             <h2 id="events-title">请求事件</h2>
             <div class="filters">
-              <input id="filter-q" class="search" type="search" placeholder="搜索" aria-label="搜索模型、会话、项目或错误" />
+              <label class="search-field">
+                <svg class="lucide" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></svg>
+                <input id="filter-q" type="search" placeholder="搜索事件" aria-label="搜索模型、会话、项目、请求 ID 或错误" autocomplete="off" />
+              </label>
               <div id="filter-model"></div>
               <div id="filter-project"></div>
               <div id="filter-status"></div>
@@ -41,25 +56,42 @@
               <button id="columns-button" class="button" type="button" aria-haspopup="dialog"></button>
             </div>
           </div>
-          <div class="table-wrap">
-            <table id="events-table">
-              <thead></thead>
-              <tbody></tbody>
-            </table>
-            <div id="events-empty" class="empty hidden"></div>
+          <div id="events-area" class="table-area">
+            <div class="table-progress" aria-hidden="true"></div>
+            <button id="events-newer" class="new-pill hidden" type="button"></button>
+            <div id="events-wrap" class="table-wrap">
+              <table id="events-table" class="events-table">
+                <thead></thead>
+                <tbody></tbody>
+              </table>
+              <div id="events-empty" class="empty"></div>
+            </div>
           </div>
           <div class="table-footer">
-            <span id="events-note" class="muted small"></span>
-            <div class="pager">
-              <div id="page-size"></div>
-              <button id="page-prev" class="button" type="button" aria-label="上一页">‹</button>
-              <span id="page-info" class="muted small"></span>
-              <button id="page-next" class="button" type="button" aria-label="下一页">›</button>
+            <div id="events-timeline" class="timeline hidden" tabindex="0" role="slider" aria-label="事件时间分布" aria-valuemin="0"></div>
+            <div class="footer-bar">
+              <div class="footer-info">
+                <span id="events-live" class="live-chip hidden"></span>
+                <span id="events-span" class="span-time hidden"></span>
+                <span id="events-note" class="muted small"></span>
+              </div>
+              <nav class="pager" aria-label="分页">
+                <div id="page-size"></div>
+                <button id="page-latest" class="button" type="button"></button>
+                <div id="page-controls" class="page-controls">
+                  <button id="page-prev" class="button square" type="button" aria-label="上一页"></button>
+                  <input id="page-input" class="page-input" type="text" inputmode="numeric" autocomplete="off" aria-label="页码" />
+                  <span id="page-count" class="page-count"></span>
+                  <button id="page-next" class="button square" type="button" aria-label="下一页"></button>
+                </div>
+              </nav>
+              <span id="page-status" class="visually-hidden" aria-live="polite"></span>
             </div>
           </div>
         </section>
 
-        <section id="tab-analysis" class="hidden">
+        <section id="tab-analysis" class="hidden" role="tabpanel" aria-label="统计分析">
+          <div id="analysis-loading" class="card empty">正在加载统计…</div>
           <div id="analysis-content" class="analysis-content hidden">
             <div id="summary" class="summary-grid"></div>
             <section class="card analysis-card" aria-labelledby="trend-title">
@@ -76,9 +108,20 @@
                 <div id="distribution-controls" class="analysis-controls"></div>
               </div>
               <div class="distribution-layout">
-                <div class="distribution-chart"><canvas id="distribution-chart" role="img" aria-label="用量分布图"></canvas><div class="empty hidden"></div></div>
+                <div class="distribution-chart">
+                  <canvas id="distribution-chart" role="img" aria-label="用量分布图"></canvas>
+                  <div id="distribution-center" class="distribution-center"></div>
+                  <div class="empty hidden"></div>
+                </div>
                 <div id="distribution-list" class="distribution-list"></div>
               </div>
+            </section>
+            <section class="card analysis-card" aria-labelledby="stats-title">
+              <div class="analysis-card-header">
+                <h2 id="stats-title">用量明细</h2>
+                <div id="stats-controls" class="analysis-controls"></div>
+              </div>
+              <div id="stats-table" class="analysis-table-wrap"></div>
             </section>
             <section class="card analysis-card" aria-labelledby="speed-title">
               <div class="analysis-card-header">
@@ -91,42 +134,78 @@
           </div>
         </section>
 
-        <section id="tab-prices" class="card table-card hidden" aria-labelledby="prices-title">
-          <div class="card-header prices-header">
+        <section id="tab-prices" class="card table-card hidden" role="tabpanel" aria-labelledby="prices-title">
+          <div class="card-header">
             <h2 id="prices-title">模型价格</h2>
-            <div class="prices-controls">
+            <div class="filters">
               <div id="prices-status"></div>
-              <input id="prices-query" class="search" type="search" placeholder="搜索模型或提供商" aria-label="搜索模型、计价型号或提供商" autocomplete="off" />
-              <button id="catalog-refresh" class="button" type="button">更新参考价</button>
+              <label class="search-field">
+                <svg class="lucide" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></svg>
+                <input id="prices-query" type="search" placeholder="搜索模型或提供商" aria-label="搜索模型、计价型号或提供商" autocomplete="off" />
+              </label>
+              <button id="catalog-refresh" class="button" type="button"></button>
             </div>
           </div>
-          <div class="table-wrap">
-            <table id="prices-table"><thead></thead><tbody></tbody></table>
-            <div id="prices-empty" class="empty hidden"></div>
+          <p id="prices-error" class="inline-error hidden" role="alert"></p>
+          <div class="table-area">
+            <div id="prices-wrap" class="table-wrap">
+              <div id="prices-table"></div>
+              <div id="prices-empty" class="empty hidden"></div>
+            </div>
           </div>
           <div class="table-footer">
-            <span id="prices-note" class="muted small" role="status"></span>
+            <div class="footer-bar"><span id="prices-note" class="muted small" role="status"></span></div>
           </div>
         </section>
       </main>
     </div>
 
     <dialog id="columns-dialog" class="column-dialog" aria-labelledby="columns-title">
-      <h2 id="columns-title">列设置</h2>
+      <div class="dialog-title">
+        <h2 id="columns-title">列设置</h2>
+        <span id="columns-count" class="muted small"></span>
+      </div>
+      <input id="columns-search" type="search" placeholder="搜索列" aria-label="搜索列" autocomplete="off" />
       <div id="columns-list" class="column-settings"></div>
       <p id="columns-status" class="visually-hidden" aria-live="polite"></p>
       <div class="dialog-actions">
         <button id="columns-reset" class="link" type="button">恢复默认</button>
+        <button id="columns-all" class="link" type="button">显示全部</button>
         <span class="spacer"></span>
         <button id="columns-cancel" class="button" type="button">取消</button>
         <button id="columns-save" class="button primary" type="button">保存</button>
       </div>
     </dialog>
 
-    <dialog id="price-dialog" class="price-dialog" aria-labelledby="price-model">
+    <dialog id="event-dialog" class="sheet-dialog event-dialog" aria-labelledby="event-title">
+      <div class="detail-heading">
+        <h2 id="event-title">请求详情</h2>
+        <span id="event-status"></span>
+        <button id="close-event" class="icon-button" type="button" aria-label="关闭"></button>
+      </div>
+      <div id="event-detail" class="detail-body" tabindex="0" role="region" aria-label="请求详情内容"></div>
+    </dialog>
+
+    <dialog id="breakdown-dialog" class="sheet-dialog breakdown-dialog" aria-labelledby="breakdown-title">
+      <div class="detail-heading">
+        <h2 id="breakdown-title"></h2>
+        <div id="breakdown-controls"></div>
+        <button id="close-breakdown" class="icon-button" type="button" aria-label="关闭"></button>
+      </div>
+      <div id="breakdown-body" class="detail-body breakdown-body" tabindex="0" role="region" aria-label="用量拆分"></div>
+    </dialog>
+
+    <dialog id="price-dialog" class="price-dialog" aria-labelledby="price-title">
       <form id="price-form" method="dialog">
-        <h2 id="price-model" class="mono"></h2>
-        <input id="price-search" type="search" placeholder="从 models.dev 填入" aria-label="搜索 models.dev" autocomplete="off" />
+        <div class="dialog-title">
+          <h2 id="price-title">设置价格</h2>
+          <span id="price-model" class="mono"></span>
+        </div>
+        <p id="price-current" class="muted small"></p>
+        <label class="search-field wide">
+          <svg class="lucide" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></svg>
+          <input id="price-search" type="search" placeholder="从 models.dev 填入" aria-label="搜索 models.dev 参考价" autocomplete="off" />
+        </label>
         <div id="price-search-results" class="search-results"></div>
         <div class="price-grid">
           <span></span>
@@ -134,18 +213,18 @@
           <span>输出 $/M</span>
           <span>缓存读 $/M</span>
           <span>缓存写 $/M</span>
-          <span>标准</span>
+          <span class="price-tier">标准</span>
           <input id="price-input" type="number" min="0" step="any" required aria-label="输入" />
           <input id="price-output" type="number" min="0" step="any" required aria-label="输出" />
           <input id="price-cache_read" type="number" min="0" step="any" aria-label="缓存读" />
           <input id="price-cache_write" type="number" min="0" step="any" aria-label="缓存写" />
           <label class="price-threshold">&gt; <input id="price-threshold" type="number" min="1" step="1" placeholder="长上下文" aria-label="长上下文阈值（Token）" /></label>
-          <input id="price-long-input" type="number" min="0" step="any" aria-label="长上下文输入" />
-          <input id="price-long-output" type="number" min="0" step="any" aria-label="长上下文输出" />
-          <input id="price-long-cache_read" type="number" min="0" step="any" aria-label="长上下文缓存读" />
-          <input id="price-long-cache_write" type="number" min="0" step="any" aria-label="长上下文缓存写" />
+          <input id="price-long-input" class="long-rate" type="number" min="0" step="any" aria-label="长上下文输入" />
+          <input id="price-long-output" class="long-rate" type="number" min="0" step="any" aria-label="长上下文输出" />
+          <input id="price-long-cache_read" class="long-rate" type="number" min="0" step="any" aria-label="长上下文缓存读" />
+          <input id="price-long-cache_write" class="long-rate" type="number" min="0" step="any" aria-label="长上下文缓存写" />
         </div>
-        <p id="price-error" class="notice error hidden"></p>
+        <p id="price-error" class="inline-error hidden"></p>
         <div class="dialog-actions">
           <span class="spacer"></span>
           <button id="price-cancel" class="button" type="button">取消</button>
@@ -154,7 +233,19 @@
       </form>
     </dialog>
 
-    <div id="tooltip" class="hover-tooltip" role="tooltip" popover="manual"></div>
+    <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-title">
+      <form id="confirm-form" method="dialog">
+        <h2 id="confirm-title"></h2>
+        <p id="confirm-message"></p>
+        <div class="dialog-actions">
+          <span class="spacer"></span>
+          <button id="confirm-cancel" class="button" value="" formnovalidate>取消</button>
+          <button id="confirm-ok" class="button danger" value="ok"></button>
+        </div>
+      </form>
+    </dialog>
+
+    <div id="tooltip" class="hover-tooltip" role="tooltip" tabindex="-1" popover="manual"></div>
     <script src="vendor/chart.umd.min.js"></script>
     <script type="module" src="app.js"></script>
   </body>

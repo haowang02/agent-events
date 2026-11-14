@@ -2,6 +2,7 @@ package server
 
 import (
 	"cmp"
+	"errors"
 	"math"
 	"net/http"
 	"slices"
@@ -76,7 +77,57 @@ type TrendPoint struct {
 type DistributionRow struct {
 	Key string `json:"key"`
 	Usage
+	Speed GroupSpeed `json:"speed"`
 }
+
+// GroupSpeed holds medians over a group's timed successful requests.
+type GroupSpeed struct {
+	Samples    int     `json:"samples"`
+	TPS        float64 `json:"tps"`
+	TTFT       float64 `json:"ttft_ms"`
+	Latency    float64 `json:"latency_ms"`
+	LatencyP95 float64 `json:"latency_p95_ms"`
+}
+
+type speedSamples struct{ tps, ttft, latency []float64 }
+
+func (s *speedSamples) add(view *EventView) {
+	if view.Failed || view.Scope != "" || view.LatencyMS <= 0 {
+		return
+	}
+	s.latency = append(s.latency, float64(view.LatencyMS))
+	if view.TTFTMS > 0 {
+		s.ttft = append(s.ttft, float64(view.TTFTMS))
+	}
+	if view.TPS != nil {
+		s.tps = append(s.tps, *view.TPS)
+	}
+}
+
+func (s *speedSamples) speed() GroupSpeed {
+	for _, values := range [][]float64{s.tps, s.ttft, s.latency} {
+		slices.Sort(values)
+	}
+	return GroupSpeed{
+		Samples: len(s.latency), TPS: percentile(s.tps, 0.5), TTFT: percentile(s.ttft, 0.5),
+		Latency: percentile(s.latency, 0.5), LatencyP95: percentile(s.latency, 0.95),
+	}
+}
+
+// TrendSeries is one entity's share of the trend. The entities past the
+// first trendSeriesLimit share one series whose Others counts them.
+type TrendSeries struct {
+	Key      string    `json:"key"`
+	Others   int       `json:"others,omitempty"`
+	Requests []int     `json:"requests"`
+	Failed   []int     `json:"failed"`
+	Tokens   []int64   `json:"total_tokens"`
+	Cost     []float64 `json:"cost"`
+}
+
+// trendSeriesLimit matches the colored entries of the distribution; agents
+// keep a series each.
+const trendSeriesLimit = 6
 
 // SpeedStats are percentiles of output tokens per second.
 type SpeedStats struct {
@@ -94,14 +145,16 @@ type Analysis struct {
 	Summary      Summary                      `json:"summary"`
 	Trend        []TrendPoint                 `json:"trend"`
 	Distribution map[string][]DistributionRow `json:"distribution"`
+	TrendBy      string                       `json:"trend_by,omitempty"`
+	TrendSeries  []TrendSeries                `json:"trend_series,omitempty"`
 	SpeedModels  []Option                     `json:"speed_models"`
 	SpeedModel   string                       `json:"speed_model"`
 	Speed        SpeedStats                   `json:"speed"`
 	SpeedTrend   []SpeedStats                 `json:"speed_trend"`
 }
 
-// timeBuckets split a time range into local hours, for ranges up to three
-// days, or local days.
+// timeBuckets split a time range into local hours or days. Hours are the
+// default up to three days and available up to a month.
 type timeBuckets struct {
 	hourly   bool
 	location *time.Location
@@ -109,8 +162,16 @@ type timeBuckets struct {
 	index    map[int64]int
 }
 
-func newTimeBuckets(from, to int64, location *time.Location) *timeBuckets {
-	b := &timeBuckets{hourly: to-from <= 3*24*time.Hour.Milliseconds(), location: location, index: map[int64]int{}}
+func newTimeBuckets(from, to int64, location *time.Location, bucket string) *timeBuckets {
+	day := 24 * time.Hour.Milliseconds()
+	hourly := to-from <= 3*day
+	switch bucket {
+	case "hour":
+		hourly = to-from <= 31*day
+	case "day":
+		hourly = false
+	}
+	b := &timeBuckets{hourly: hourly, location: location, index: map[int64]int{}}
 	for at := b.start(from); at < to && len(b.starts) < 2000; at = b.next(at) {
 		b.index[at] = len(b.starts)
 		b.starts = append(b.starts, at)
@@ -166,10 +227,20 @@ var distributionKeys = map[string]func(*EventView) string{
 	"providers": func(v *EventView) string { return v.Provider },
 }
 
+// AnalysisQuery selects what Analysis returns besides the summary.
+type AnalysisQuery struct {
+	Filter
+	Location   *time.Location
+	Bucket     string // "hour", "day" or "" to choose by range.
+	TrendBy    string // A distribution dimension to split the trend by, or "".
+	SpeedModel string
+}
+
 // Analysis summarizes the matching events. Speed covers one model, the
 // requested one or else the one with most timed requests, since different
 // models' speeds are not comparable.
-func (s *Server) Analysis(filter Filter, location *time.Location, speedModel string) Analysis {
+func (s *Server) Analysis(query AnalysisQuery) Analysis {
+	filter, location, speedModel := query.Filter, query.Location, query.SpeedModel
 	s.mu.RLock()
 	var views []EventView
 	for i := range s.events {
@@ -189,7 +260,7 @@ func (s *Server) Analysis(filter Filter, location *time.Location, speedModel str
 			from = views[len(views)-1].Time
 		}
 	}
-	buckets := newTimeBuckets(from, to, location)
+	buckets := newTimeBuckets(from, to, location, query.Bucket)
 	result := Analysis{Bucket: "day", Trend: make([]TrendPoint, len(buckets.starts)), Distribution: map[string][]DistributionRow{}}
 	if buckets.hourly {
 		result.Bucket = "hour"
@@ -198,8 +269,10 @@ func (s *Server) Analysis(filter Filter, location *time.Location, speedModel str
 		result.Trend[i].Time = start
 	}
 	groups := map[string]map[string]*Usage{}
+	samples := map[string]map[string]*speedSamples{}
 	for name := range distributionKeys {
 		groups[name] = map[string]*Usage{}
+		samples[name] = map[string]*speedSamples{}
 	}
 	speedCounts := map[string]int{}
 	for i := range views {
@@ -213,8 +286,10 @@ func (s *Server) Analysis(filter Filter, location *time.Location, speedModel str
 			if usage == nil {
 				usage = &Usage{}
 				groups[name][key(view)] = usage
+				samples[name][key(view)] = &speedSamples{}
 			}
 			usage.add(view)
+			samples[name][key(view)].add(view)
 		}
 		if view.TPS != nil {
 			speedCounts[view.Model]++
@@ -235,12 +310,16 @@ func (s *Server) Analysis(filter Filter, location *time.Location, speedModel str
 	for name, usages := range groups {
 		rows := make([]DistributionRow, 0, len(usages))
 		for key, usage := range usages {
-			rows = append(rows, DistributionRow{Key: key, Usage: *usage})
+			rows = append(rows, DistributionRow{Key: key, Usage: *usage, Speed: samples[name][key].speed()})
 		}
 		slices.SortFunc(rows, func(x, y DistributionRow) int {
 			return cmp.Or(cmp.Compare(y.Total, x.Total), cmp.Compare(x.Key, y.Key))
 		})
 		result.Distribution[name] = rows
+	}
+	if key := distributionKeys[query.TrendBy]; key != nil {
+		result.TrendBy = query.TrendBy
+		result.TrendSeries = trendSeries(views, buckets, key, result.Distribution[query.TrendBy], query.TrendBy == "agents")
 	}
 
 	result.SpeedModels = countOptions(speedCounts)
@@ -268,11 +347,100 @@ func (s *Server) Analysis(filter Filter, location *time.Location, speedModel str
 	return result
 }
 
+// trendSeries splits the trend by entity, in the order of rows.
+func trendSeries(views []EventView, buckets *timeBuckets, key func(*EventView) string, rows []DistributionRow, all bool) []TrendSeries {
+	n := len(buckets.starts)
+	newSeries := func(key string) TrendSeries {
+		return TrendSeries{Key: key, Requests: make([]int, n), Failed: make([]int, n), Tokens: make([]int64, n), Cost: make([]float64, n)}
+	}
+	limit := len(rows)
+	if !all && limit > trendSeriesLimit+1 {
+		limit = trendSeriesLimit
+	}
+	series := make([]TrendSeries, 0, limit+1)
+	index := map[string]int{}
+	for _, row := range rows[:limit] {
+		index[row.Key] = len(series)
+		series = append(series, newSeries(row.Key))
+	}
+	if limit < len(rows) {
+		other := newSeries("")
+		other.Others = len(rows) - limit
+		series = append(series, other)
+	}
+	for i := range views {
+		view := &views[i]
+		bucket, ok := buckets.find(view.Time)
+		if !ok {
+			continue
+		}
+		target, ok := index[key(view)]
+		if !ok {
+			target = len(series) - 1
+		}
+		item := &series[target]
+		item.Requests[bucket]++
+		if view.Failed {
+			item.Failed[bucket]++
+		}
+		item.Tokens[bucket] += view.TotalTokens
+		if view.Cost != nil {
+			item.Cost[bucket] += view.Cost.Total
+		}
+	}
+	return series
+}
+
+// Breakdown splits the matching events of one entity of a dimension by
+// another dimension, largest cost first.
+func (s *Server) Breakdown(filter Filter, dimension, key, by string) []DistributionRow {
+	of, split := distributionKeys[dimension], distributionKeys[by]
+	if of == nil || split == nil {
+		return nil
+	}
+	usages, samples := map[string]*Usage{}, map[string]*speedSamples{}
+	s.mu.RLock()
+	for i := range s.events {
+		e := &s.events[i]
+		if !filter.match(e) {
+			continue
+		}
+		view := s.view(e)
+		if of(&view) != key {
+			continue
+		}
+		group := split(&view)
+		if usages[group] == nil {
+			usages[group], samples[group] = &Usage{}, &speedSamples{}
+		}
+		usages[group].add(&view)
+		samples[group].add(&view)
+	}
+	s.mu.RUnlock()
+	rows := make([]DistributionRow, 0, len(usages))
+	for group, usage := range usages {
+		rows = append(rows, DistributionRow{Key: group, Usage: *usage, Speed: samples[group].speed()})
+	}
+	slices.SortFunc(rows, func(x, y DistributionRow) int {
+		return cmp.Or(cmp.Compare(y.Cost, x.Cost), cmp.Compare(y.Total, x.Total), cmp.Compare(x.Key, y.Key))
+	})
+	return rows
+}
+
+func (s *Server) handleBreakdown(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	rows := s.Breakdown(parseFilter(query), query.Get("dimension"), query.Get("key"), query.Get("by"))
+	if rows == nil {
+		writeError(w, http.StatusBadRequest, errors.New("unknown dimension"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"rows": rows})
+}
+
 func (s *Server) handleAnalysis(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
-	location, err := time.LoadLocation(query.Get("tz"))
-	if err != nil {
-		location = time.Local
-	}
-	writeJSON(w, http.StatusOK, s.Analysis(parseFilter(query), location, query.Get("speed_model")))
+	writeJSON(w, http.StatusOK, s.Analysis(AnalysisQuery{
+		Filter: parseFilter(query), Location: queryLocation(query), Bucket: query.Get("bucket"),
+		TrendBy: query.Get("trend_by"), SpeedModel: query.Get("speed_model"),
+	}))
 }

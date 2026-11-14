@@ -13,6 +13,9 @@ const (
 // session when Scope is set. Token counts are split into non-overlapping
 // buckets so that every agent is priced the same way.
 type Event struct {
+	// Seq grows as the store first saves events, so a page can hold a
+	// snapshot while newer events arrive. Collectors leave it zero.
+	Seq      int64  `json:"seq,omitempty"`
 	Agent    string `json:"agent"`
 	ID       string `json:"id"`
 	Time     int64  `json:"time"` // Unix milliseconds; request start when known.

@@ -1,202 +1,118 @@
+// The events tab. Pages come from a snapshot of the events saved up to an
+// anchor, so paging and live updates never shift the rows; events saved
+// later only count toward a "new events" pill until the view returns to the
+// newest page.
+import { $, el, icon } from "./dom.js";
+import { hideTip } from "./tooltip.js";
 import { select } from "./controls.js";
-import { $, el, icon, tip, hideTip, copyButton, makeSortable } from "./dom.js";
-import {
-  api, pref, savePref, state, rangeParams, int, usd, rate, latency, tps, percent, dateTimeLines, shortPath, projectName, agentTag,
-  priceSource
-} from "./core.js";
+import { api, pref, savePref, state, rangeParams, int, shortPath } from "./core.js";
+import { columnLayout, initColumnSettings } from "./column-settings.js";
+import { openDetail, initEventDetail } from "./event-detail.js";
+import { createPager, pageSize } from "./pager.js";
 
-const line = (...children) => el("div", { class: "cell-line" }, ...children);
-const sub = (text) => el("div", { class: "cell-sub cell-line", text: text || "—" });
-const detail = (text, className = "") => tip(el("span", { class: "cell-detail " + className, text: text || "—" }), text, { overflowOnly: true });
-const promptTokens = (e) => e.input_tokens + e.cache_read_tokens + e.cache_write_tokens;
-const SCOPES = { turn: "轮次汇总", session: "会话汇总" };
-const costNotes = (cost) =>
-  [cost.long_context && "长上下文", cost.multiplier && `优先处理 ×${cost.multiplier}`].filter(Boolean).map((note) => " · " + note).join("");
-
-function costTooltip(entry) {
-  const { cost } = entry;
-  const fiveMinute = entry.cache_write_tokens - entry.cache_write_1h_tokens;
-  const rows = [
-    ["非缓存输入", entry.input_tokens, cost.input_rate],
-    ["缓存读取", entry.cache_read_tokens, cost.cache_read_rate],
-    fiveMinute && ["缓存写入", fiveMinute, cost.cache_write_rate],
-    entry.cache_write_1h_tokens && ["1h 缓存写入", entry.cache_write_1h_tokens, cost.cache_write_1h_rate],
-    ["输出", entry.output_tokens, cost.output_rate]
-  ].filter(Boolean);
-  return [
-    el("div", { class: "tip-title", text: "费用明细" }),
-    el(
-      "div",
-      { class: "tip-grid" },
-      el("span", { class: "head", text: "项目" }),
-      el("span", { class: "head num", text: "Token × 单价 / 1M" }),
-      el("span", { class: "head num", text: "金额" }),
-      rows.map(([name, count, unit]) => [
-        el("span", { text: name }),
-        el("span", { class: "num", text: int(count) + " × " + rate(unit) }),
-        el("span", { class: "num", text: usd((count * unit) / 1e6) })
-      ])
-    ),
-    el("div", { class: "tip-total" }, el("span", { text: "合计" }), el("span", { text: usd(cost.total) })),
-    el("div", { class: "tip-note", text: priceSource(entry.price) + costNotes(cost) })
-  ];
-}
-
-// Columns in their default order. Time anchors each row, so it cannot be hidden.
-const COLUMNS = [
-  { id: "time", label: "时间", sort: "time", required: true, cell: (e) => dateTimeLines(e.time) },
-  { id: "agent", label: "Agent", sort: "agent", cell: (e) => agentTag(e.agent) },
-  {
-    id: "model",
-    label: "模型",
-    sort: "model",
-    cell: (e) => [line(el("span", { class: "mono", text: e.model || "未知模型" })), e.provider && sub(e.provider)]
-  },
-  {
-    id: "effort",
-    label: "推理 / 档位",
-    cell: (e) => [line(el("span", { class: "mono", text: e.effort || "—" })), e.tier && line(el("span", { class: "tag warn", text: e.tier }))]
-  },
-  {
-    id: "status",
-    label: "结果",
-    sort: "status",
-    cell: (e) =>
-      el("span", {
-        class: "tag " + (e.failed ? "bad" : "ok"),
-        text: e.failed ? "失败" : "成功",
-        tip: e.error && (() => [el("div", { class: "tip-title", text: "错误信息" }), el("pre", { class: "mono", text: e.error })])
-      })
-  },
-  {
-    id: "speed",
-    label: "TPS / 延迟",
-    sort: "speed",
-    num: true,
-    cell: (e) => [
-      el("div", { text: tps(e.tps) }),
-      el("div", {
-        class: "cell-sub",
-        text: e.ttft_ms ? latency(e.ttft_ms) + " · " + latency(e.latency_ms) : latency(e.latency_ms),
-        tip: e.ttft_ms ? "首字时间 · 总延迟" : "总延迟"
-      })
-    ]
-  },
-  { id: "input", label: "输入", sort: "input", num: true, cell: (e) => int(promptTokens(e)) },
-  {
-    id: "cache_read",
-    label: "缓存读取",
-    sort: "cache_read",
-    num: true,
-    cell: (e) => [
-      el("div", { text: int(e.cache_read_tokens) }),
-      el("div", { class: "cell-sub", text: promptTokens(e) ? percent((e.cache_read_tokens * 100) / promptTokens(e)) : "—" })
-    ]
-  },
-  {
-    id: "cache_write",
-    label: "缓存写入",
-    sort: "cache_write",
-    num: true,
-    cell: (e) => [
-      el("div", { text: int(e.cache_write_tokens) }),
-      e.cache_write_1h_tokens > 0 && el("div", { class: "cell-sub", text: "1h " + int(e.cache_write_1h_tokens) })
-    ]
-  },
-  {
-    id: "output",
-    label: "输出",
-    sort: "output",
-    num: true,
-    cell: (e) => [el("div", { text: int(e.output_tokens) }), e.reasoning_tokens > 0 && el("div", { class: "cell-sub", text: "推理 " + int(e.reasoning_tokens) })]
-  },
-  { id: "total", label: "总 Token", sort: "total", num: true, hidden: true, cell: (e) => int(e.total_tokens) },
-  {
-    id: "cost",
-    label: "费用",
-    sort: "cost",
-    num: true,
-    cell: (e) =>
-      e.cost
-        ? [
-            el("div", {}, el("span", { class: "has-tip", text: usd(e.cost.total), tip: () => costTooltip(e) })),
-            el("div", { class: "cell-sub", text: (e.price.source === "custom" ? "自定义" : "参考价") + costNotes(e.cost) })
-          ]
-        : el("span", { class: "muted", text: "未定价" })
-  },
-  {
-    id: "project",
-    label: "项目",
-    sort: "project",
-    cell: (e) => [line(el("span", { text: projectName(e.project) || "—" })), el("div", { class: "cell-sub" }, detail(shortPath(e.project)))]
-  },
-  {
-    id: "session",
-    label: "会话",
-    sort: "session",
-    cell: (e) => [
-      line(detail(e.session, "mono"), e.session && copyButton("复制会话 ID", e.session)),
-      sub([e.kind, SCOPES[e.scope]].filter(Boolean).join(" · "))
-    ]
-  },
-  { id: "client", label: "客户端", hidden: true, cell: (e) => [line(el("span", { text: e.client || "—" })), sub(e.version)] },
-  { id: "stop", label: "结束原因", hidden: true, cell: (e) => el("span", { class: "mono", text: e.stop || "—" }) },
-  { id: "request_id", label: "请求 ID", hidden: true, cell: (e) => line(detail(e.id, "mono"), copyButton("复制请求 ID", e.id)) },
-  { id: "source", label: "日志文件", hidden: true, cell: (e) => detail(shortPath(e.source), "mono") }
-];
-
-// The saved order, with columns added later inserted before their next default neighbor.
-function columnLayout(preference = pref("columns", null)) {
-  const order = preference?.order || [];
-  const hidden = preference?.hidden || COLUMNS.filter((column) => column.hidden).map((column) => column.id);
-  const ordered = [...new Set(order)].map((id) => COLUMNS.find((column) => column.id === id)).filter(Boolean);
-  for (const [index, column] of COLUMNS.entries()) {
-    if (ordered.includes(column)) continue;
-    const next = COLUMNS.slice(index + 1).find((candidate) => ordered.includes(candidate));
-    ordered.splice(next ? ordered.indexOf(next) : ordered.length, 0, column);
-  }
-  return ordered.map((column) => ({ column, visible: column.required || !hidden.includes(column.id) }));
-}
-
+const DETAIL_COLUMN = {
+  id: "detail",
+  label: "",
+  className: "detail-cell",
+  cell: (e) => el("button", { class: "link", type: "button", text: "详情", "aria-label": "查看请求详情", onclick: () => openDetail(e) })
+};
 const NO_FILTERS = { q: "", model: "", project: "", status: "" };
+const STATUSES = [{ value: "", label: "全部结果" }, { value: "ok", label: "成功" }, { value: "failed", label: "失败" }];
+const DEFAULT_SORT = { key: "time", order: "desc" };
+const saved = pref("event-filters", {});
 
 const view = {
-  filters: pref("event-filters", NO_FILTERS),
-  sort: pref("event-sort", { key: "time", order: "desc" }),
-  limit: pref("page-size", 50),
+  filters: Object.fromEntries(Object.keys(NO_FILTERS).map((key) => [key, saved[key] || ""])),
+  sort: pref("event-sort", DEFAULT_SORT),
+  limit: pageSize(),
   offset: 0,
+  anchor: 0, // The snapshot's largest seq; 0 takes a new one.
   data: null,
+  rows: "", // The rendered rows, to skip redrawing identical pages.
   sequence: 0
 };
+let pager;
+const selects = {};
 
-export function resetEventPage() {
+const isLive = () => view.offset === 0 && $("events-wrap").scrollTop <= 4 && !document.querySelector("dialog[open]");
+
+export function resetEvents() {
   view.offset = 0;
+  view.anchor = 0;
+  $("events-wrap").scrollTop = 0;
 }
 
-export async function loadEvents() {
+// Background reloads keep the snapshot unless the view is live.
+export const loadEvents = ({ interactive = false } = {}) => fetchEvents({ rebase: isLive(), interactive });
+
+// rebase drops the snapshot for the newest data; interactive marks a load
+// the user asked for, which shows progress.
+async function fetchEvents({ rebase = false, interactive = false } = {}) {
+  const previous = view.data ? view.anchor : 0;
+  if (rebase) view.anchor = 0;
   const params = rangeParams();
   for (const [key, value] of Object.entries(view.filters)) if (value) params.set(key, value);
   params.set("sort", view.sort.key);
   params.set("order", view.sort.order);
   params.set("offset", String(view.offset));
   params.set("limit", String(view.limit));
+  if (view.anchor) params.set("anchor", String(view.anchor));
   const sequence = ++view.sequence;
-  const data = await api("GET", "/api/events?" + params);
-  if (sequence !== view.sequence) return;
-  view.data = data;
-  renderEvents();
+  if (interactive) $("events-area").classList.add("loading");
+  try {
+    const data = await api("GET", "/api/events?" + params);
+    if (sequence !== view.sequence) return;
+    view.anchor = data.anchor;
+    if (view.offset > 0 && view.offset >= data.total) {
+      view.offset = Math.max(0, (Math.ceil(data.total / view.limit) - 1) * view.limit);
+      return fetchEvents({ interactive });
+    }
+    const fresh = rebase && previous && data.anchor > previous ? previous : 0;
+    view.data = data;
+    renderEvents({ fresh, announce: interactive });
+  } catch (error) {
+    if (sequence === view.sequence && !view.data) $("events-empty").replaceChildren(emptyState("事件加载失败", error.message));
+    throw error;
+  } finally {
+    if (sequence === view.sequence) $("events-area").classList.remove("loading");
+  }
 }
 
-const filterSelects = {};
+function showPage(options = {}) {
+  $("events-wrap").scrollTop = 0;
+  return fetchEvents({ ...options, interactive: true }).catch(console.error);
+}
 
 // Keep an active filter selectable when its count drops to zero.
-function fillSelect(key, allLabel, options, label = (value) => value) {
+function filterOptions(key, allLabel, options, label = (value) => value) {
   const current = view.filters[key];
   const rows = current && !options.some((option) => option.value === current) ? [{ value: current, count: 0 }, ...options] : options;
-  filterSelects[key].update([
-    { value: "", label: allLabel },
-    ...rows.map((option) => ({ value: option.value, label: label(option.value) || "（空）", detail: int(option.count) }))
-  ], current);
+  const total = options.reduce((sum, option) => sum + option.count, 0);
+  return [{ value: "", label: allLabel, detail: int(total) }, ...rows.map((option) => ({ value: option.value, label: label(option.value) || "（空）", detail: int(option.count) }))];
+}
+
+function updateFilters() {
+  const { data, filters } = view;
+  if (!data) return;
+  selects.model.update(filterOptions("model", "全部模型", data.models), filters.model);
+  selects.project.update(filterOptions("project", "全部项目", data.projects, shortPath), filters.project);
+  selects.status.update(STATUSES, filters.status);
+  $("filter-clear").disabled = !Object.values(filters).some(Boolean);
+}
+
+// Times and numbers sort newest or largest first, text A to Z; a third click
+// returns to newest first.
+const firstOrder = (column) => (column.num || column.sort === "time" ? "desc" : "asc");
+function setSort(column) {
+  const first = firstOrder(column);
+  const { sort } = view;
+  if (sort.key !== column.sort) view.sort = { key: column.sort, order: first };
+  else if (sort.order === first) view.sort = { key: column.sort, order: first === "asc" ? "desc" : "asc" };
+  else view.sort = DEFAULT_SORT;
+  savePref("event-sort", view.sort);
+  view.offset = 0;
+  view.anchor = 0;
+  showPage();
 }
 
 function header(columns) {
@@ -204,117 +120,121 @@ function header(columns) {
     "tr",
     {},
     columns.map((column) => {
-      if (!column.sort) return el("th", { class: column.num ? "num" : "" }, column.label);
+      const className = [column.num && "num", column.className].filter(Boolean).join(" ") || null;
+      if (!column.sort) return el("th", { class: className, text: column.label });
       const active = view.sort.key === column.sort;
-      const ascending = active && view.sort.order === "asc";
       return el(
         "th",
-        {
-          class: (column.num ? "num " : "") + "sortable",
-          "aria-sort": active ? (ascending ? "ascending" : "descending") : "none",
-          tabindex: "0",
-          onclick: () => setSort(column.sort),
-          onkeydown: (event) => {
-            if (event.key !== "Enter" && event.key !== " ") return;
-            event.preventDefault();
-            setSort(column.sort);
-          }
-        },
-        column.label,
-        el("span", { class: "sort-mark", text: ascending ? "↑" : "↓" })
+        { class: [className, firstOrder(column) === "desc" && "desc-first"].filter(Boolean).join(" "), "aria-sort": active ? (view.sort.order === "asc" ? "ascending" : "descending") : null },
+        el("button", { class: "sort-button", type: "button", onclick: () => setSort(column) }, column.label, icon("arrow-up", { class: "sort-mark" }))
       );
     })
   );
 }
 
-function renderEvents() {
-  hideTip();
-  const { data, filters } = view;
-  fillSelect("model", "全部模型", data.models);
-  fillSelect("project", "全部项目", data.projects, shortPath);
-  const counts = data.status_counts;
-  filterSelects.status.update([
-    ["", "全部结果", counts.all], ["ok", "成功", counts.ok], ["failed", "失败", counts.failed]
-  ].map(([value, label, count]) => ({ value, label, detail: int(count) })), filters.status);
-  $("filter-clear").disabled = !Object.values(filters).some(Boolean);
+function emptyState(title, detail, action) {
+  return el("div", { class: "empty-state" }, el("strong", { text: title }), detail && el("span", { text: detail }), action);
+}
 
+// fresh is the previous snapshot's anchor; rows saved after it flash briefly.
+function renderEvents({ fresh = 0, announce = false } = {}) {
+  const { data } = view;
+  updateFilters();
   // A single agent makes the agent column redundant.
-  const columns = columnLayout()
-    .filter(({ column, visible }) => visible && !(column.id === "agent" && state.agent))
-    .map(({ column }) => column);
-  $("events-table").querySelector("thead").replaceChildren(header(columns));
-  $("events-table").querySelector("tbody").replaceChildren(
-    ...data.entries.map((entry) => el("tr", {}, columns.map((column) => el("td", { class: column.num ? "num" : "" }, column.cell(entry)))))
-  );
-  $("events-empty").classList.toggle("hidden", data.entries.length > 0);
-  $("events-empty").textContent = state.server?.ready ? "所选范围内没有请求事件" : "正在扫描日志…";
-
-  const pages = Math.max(1, Math.ceil(data.total / view.limit));
-  const page = Math.floor(view.offset / view.limit) + 1;
-  $("page-info").textContent = `${page} / ${pages}`;
-  $("page-prev").disabled = page <= 1;
-  $("page-next").disabled = page >= pages;
-  const shown = data.total ? `，显示第 ${int(view.offset + 1)}–${int(view.offset + data.entries.length)} 条` : "";
-  $("events-note").textContent = `共 ${int(data.total)} 条${shown}`;
+  const columns = [
+    ...columnLayout()
+      .filter(({ column, visible }) => visible && !(column.id === "agent" && state.agent))
+      .map(({ column }) => column),
+    DETAIL_COLUMN
+  ];
+  const entries = data?.entries || [];
+  const rows = JSON.stringify([columns.map((column) => column.id), view.sort, entries]);
+  if (fresh || rows !== view.rows) {
+    view.rows = rows;
+    hideTip();
+    $("events-table").querySelector("thead").replaceChildren(header(columns));
+    $("events-table").querySelector("tbody").replaceChildren(
+      ...entries.map((entry) =>
+        el(
+          "tr",
+          { class: fresh && entry.seq > fresh ? "fresh" : null, onclick: (event) => openRow(event, entry) },
+          columns.map((column) => el("td", { class: [column.num && "num", column.className].filter(Boolean).join(" ") || null }, column.cell(entry)))
+        )
+      )
+    );
+  }
+  $("events-empty").classList.toggle("hidden", entries.length > 0);
+  if (!entries.length) {
+    const filtered = Object.values(view.filters).some(Boolean);
+    $("events-empty").replaceChildren(
+      !data
+        ? emptyState("正在加载事件…")
+        : !state.server?.ready
+          ? emptyState("正在扫描日志…")
+          : filtered
+            ? emptyState("没有符合筛选条件的事件", null, el("button", { class: "button", type: "button", text: "清除筛选", onclick: clearFilters }))
+            : emptyState("所选范围内没有请求事件")
+    );
+  }
+  pager.render(view, { live: isLive(), announce });
 }
 
-// A column sorts descending first, then ascending, then back to newest first.
-function setSort(key) {
-  const { sort } = view;
-  if (sort.key !== key) view.sort = { key, order: "desc" };
-  else if (sort.order === "desc") view.sort = { key, order: "asc" };
-  else view.sort = { key: "time", order: "desc" };
-  savePref("event-sort", view.sort);
-  view.offset = 0;
-  loadEvents();
+function openRow(event, entry) {
+  if (event.target.closest("button, a, input, .tag[tabindex], .has-tip") || getSelection()?.toString()) return;
+  openDetail(entry);
 }
+
+export const renderEventStatus = () => view.data && pager.status(view, isLive());
 
 function setFilters(filters) {
   view.filters = filters;
   savePref("event-filters", filters);
   view.offset = 0;
-  loadEvents();
+  view.anchor = 0;
+  showPage();
 }
 
-function renderColumnSettings(layout) {
-  $("columns-list").replaceChildren(
-    ...layout.map(({ column, visible }) =>
-      el(
-        "div",
-        { class: "column-setting", "data-column": column.id },
-        el("button", { class: "column-handle", type: "button", "aria-label": `移动「${column.label}」列` }, icon("grip")),
-        el(
-          "label",
-          {},
-          el("span", { text: column.label }),
-          el("span", { class: "switch" }, el("input", { type: "checkbox", role: "switch", checked: visible, disabled: !!column.required }), el("i"))
-        )
-      )
-    )
-  );
+function clearFilters() {
+  $("filter-q").value = "";
+  setFilters({ ...NO_FILTERS });
 }
 
 export function initEvents() {
-  $("columns-button").replaceChildren(icon("columns"), "列设置");
-  $("columns-button").addEventListener("click", () => {
-    renderColumnSettings(columnLayout());
-    $("columns-dialog").showModal();
+  pager = createPager({
+    go(offset) {
+      if (offset === view.offset) return;
+      view.offset = offset;
+      showPage();
+    },
+    latest() {
+      view.offset = 0;
+      showPage({ rebase: true });
+    },
+    // Stay on the page that holds the current first row.
+    resize(limit) {
+      view.offset = Math.floor(view.offset / limit) * limit;
+      view.limit = limit;
+      showPage();
+    },
+    // Jump to the newest event of a span, or the oldest in ascending order;
+    // other orders switch back to newest first.
+    pick(index, { ok, failed }) {
+      if (view.sort.key !== "time") {
+        view.sort = DEFAULT_SORT;
+        savePref("event-sort", view.sort);
+      }
+      const ascending = view.sort.order === "asc";
+      let offset = 0;
+      for (let i = 0; i < ok.length; i++) if (ascending ? i < index : i > index) offset += ok[i] + failed[i];
+      view.offset = Math.floor(offset / view.limit) * view.limit;
+      showPage();
+    }
   });
-  $("columns-reset").addEventListener("click", () => renderColumnSettings(columnLayout({})));
-  $("columns-cancel").addEventListener("click", () => $("columns-dialog").close());
-  $("columns-save").addEventListener("click", () => {
-    const rows = [...$("columns-list").children];
-    savePref("columns", {
-      order: rows.map((row) => row.dataset.column),
-      hidden: rows.filter((row) => !row.querySelector("input").checked).map((row) => row.dataset.column)
-    });
-    $("columns-dialog").close();
+  initColumnSettings(() => {
+    view.rows = "";
     renderEvents();
   });
-  makeSortable($("columns-list"), ".column-handle", (row) => {
-    const rows = [...row.parentElement.children];
-    $("columns-status").textContent = `「${row.querySelector("label > span").textContent}」移到第 ${rows.indexOf(row) + 1} / ${rows.length} 位`;
-  });
+  initEventDetail();
 
   let searchTimer;
   $("filter-q").value = view.filters.q;
@@ -323,31 +243,28 @@ export function initEvents() {
     searchTimer = setTimeout(() => setFilters({ ...view.filters, q: event.target.value.trim() }), 300);
   });
   for (const [key, label] of [["model", "模型"], ["project", "项目"], ["status", "结果"]]) {
-    filterSelects[key] = select({
-      label, value: view.filters[key], options: [{ value: "", label: "全部" + label }], searchable: key !== "status",
+    selects[key] = select({
+      label,
+      value: view.filters[key],
+      options: key === "status" ? STATUSES : [{ value: "", label: "全部" + label }],
+      searchable: key !== "status",
+      showSelectedDetail: false,
       onChange: (value) => setFilters({ ...view.filters, [key]: value })
     });
-    $("filter-" + key).replaceChildren(filterSelects[key].element);
+    $("filter-" + key).replaceChildren(selects[key].element);
   }
-  $("filter-clear").addEventListener("click", () => {
-    $("filter-q").value = "";
-    setFilters(NO_FILTERS);
-  });
-  $("page-size").replaceChildren(select({
-    label: "每页条数", value: String(view.limit), options: [25, 50, 100, 200].map((count) => ({ value: String(count), label: `${count} 条/页` })),
-    onChange: (value) => {
-      view.limit = Number(value);
-      savePref("page-size", view.limit);
-      view.offset = 0;
-      loadEvents();
-    }
-  }).element);
-  $("page-prev").addEventListener("click", () => {
-    view.offset = Math.max(0, view.offset - view.limit);
-    loadEvents();
-  });
-  $("page-next").addEventListener("click", () => {
-    view.offset += view.limit;
-    loadEvents();
-  });
+  $("filter-clear").addEventListener("click", clearFilters);
+  let frame = 0;
+  $("events-wrap").addEventListener(
+    "scroll",
+    () => {
+      frame ||= requestAnimationFrame(() => {
+        frame = 0;
+        renderEventStatus();
+      });
+    },
+    { passive: true }
+  );
+  $("event-dialog").addEventListener("close", renderEventStatus);
+  renderEvents();
 }

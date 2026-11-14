@@ -1,26 +1,68 @@
+// The analysis tab: summary cards, usage trend and distribution, per-entity
+// statistics and the speed trend of one model.
 import { select, segmented } from "./controls.js";
-import { $, el, hideTip } from "./dom.js";
-import { api, pref, savePref, state, rangeParams, int, tokens, usd, latency, percent, shortPath, projectName, agentName, agentSlot, seriesColor, cssVar } from "./core.js";
-import { drawChart, tooltipStyle, timeSeriesOptions, legend, toggleLegend, sparkline, roundedStacks } from "./charts.js";
+import { $, el, icon, seriesColor, cssVar } from "./dom.js";
+import { tip, hideTip } from "./tooltip.js";
+import {
+  api, pref, savePref, state, rangeParams, selectedRange, int, tokens, usd, latency, tps, percent, promptTokens, cacheRate, shortPath, agentColor, agentTag,
+  monthDay, hourMinute, joinText, DIMENSIONS, dimensionLabel
+} from "./core.js";
+import { drawChart, tooltipStyle, timeSeriesOptions, legend, toggleLegend, roundedStacks } from "./charts.js";
+import { summaryCards } from "./summary.js";
+import { dataTable, numberColumn } from "./data-table.js";
+
+const METRICS = {
+  total_tokens: { label: "Token", option: "Token 占比", total: "总 Token", format: tokens },
+  requests: { label: "请求", option: "请求占比", total: "总请求", format: int },
+  cost: { label: "费用", option: "费用占比", total: "总费用", format: usd }
+};
+const metricKey = (value) => (value === "tokens" ? "total_tokens" : METRICS[value] ? value : "total_tokens");
+const MONTH = 31 * 86400000;
 
 const view = {
   data: null,
+  params: null,
   sequence: 0,
-  trendMetric: pref("trend-metric", "tokens"),
+  breakdowns: new Map(),
+  trendMetric: metricKey(pref("trend-metric", "total_tokens")),
+  trendGroup: pref("trend-group", "category"),
+  bucket: pref("trend-bucket", ""), // "" lets the server choose by range.
   dimension: pref("distribution-dimension", "models"),
-  metric: pref("distribution-metric", "total_tokens"),
+  metric: metricKey(pref("distribution-metric", "total_tokens")),
+  tableDimension: pref("stats-dimension", "models"),
   speedModel: "",
-  hiddenSeries: {}
+  hidden: {}
 };
 
-export async function loadAnalysis() {
+// A single agent makes the agent dimension redundant.
+function dimensions() {
+  const result = { ...DIMENSIONS };
+  if (state.agent) delete result.agents;
+  return result;
+}
+const validDimension = (value) => (dimensions()[value] ? value : "models");
+const trendGroup = () => (view.trendGroup === "category" || dimensions()[view.trendGroup] ? view.trendGroup : "category");
+// What an entity's usage splits into by default.
+const breakdownBy = (dimension) => (dimension !== "models" ? "models" : state.agent ? "projects" : "agents");
+
+// interactive fades the current charts while the user's change loads.
+export async function loadAnalysis({ interactive = false } = {}) {
   const params = rangeParams();
-  params.set("tz", Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC");
+  if (view.bucket) params.set("bucket", view.bucket);
+  if (trendGroup() !== "category") params.set("trend_by", trendGroup());
   if (view.speedModel) params.set("speed_model", view.speedModel);
   const sequence = ++view.sequence;
-  const data = await api("GET", "/api/analysis?" + params);
+  if (interactive) $("analysis-content").classList.add("loading");
+  let data;
+  try {
+    data = await api("GET", "/api/analysis?" + params);
+  } finally {
+    if (sequence === view.sequence) $("analysis-content").classList.remove("loading");
+  }
   if (sequence !== view.sequence) return;
   view.data = data;
+  view.params = params;
+  view.breakdowns.clear();
   renderAnalysis();
 }
 
@@ -28,143 +70,99 @@ export function renderAnalysis() {
   const { data } = view;
   if (!data) return;
   hideTip();
+  $("analysis-loading").classList.add("hidden");
   $("analysis-content").classList.remove("hidden");
-  renderSummary(data);
+  $("summary").replaceChildren(...summaryCards(data, { onUnpriced: () => document.dispatchEvent(new CustomEvent("navigate", { detail: { tab: "prices", priceStatus: "unpriced" } })) }));
   renderTrend(data);
   renderDistribution(data);
+  renderStats(data);
   renderSpeed(data);
 }
 
 function bucketLabel(ms, bucket) {
   const at = new Date(ms);
-  const pad = (n) => String(n).padStart(2, "0");
-  const day = `${pad(at.getMonth() + 1)}-${pad(at.getDate())}`;
-  return bucket === "hour" ? `${day} ${pad(at.getHours())}:00` : day;
+  return bucket === "hour" ? `${monthDay(at)} ${hourMinute(at)}` : monthDay(at);
 }
 
-function summaryLine(label, value) {
-  return el("div", { class: "summary-line" }, el("span", { text: label }), el("strong", { text: value }));
+// Agents keep their own color; other entities take colors by total tokens,
+// and past seven of them, those after the sixth share the "other" color.
+function entityColor(dimension, key, rows) {
+  if (dimension === "agents") return agentColor(key);
+  const index = rows.findIndex((row) => row.key === key);
+  return index >= 0 && index < (rows.length <= 7 ? 7 : 6) ? seriesColor(index + 1) : cssVar("--series-other");
 }
 
-function summaryCard(title, value, lines, spark) {
-  return el(
-    "section",
-    { class: "card summary-card", "aria-label": title },
-    el("div", { class: "summary-title", text: title }),
-    el("div", { class: "summary-value", text: value }),
-    el("div", { class: "summary-lines" }, lines),
-    spark
-  );
-}
-
-function renderSummary({ summary: s, trend, bucket }) {
-  const accent = seriesColor(1);
-  const series = (pick) => trend.map(pick);
-  $("summary").replaceChildren(
-    summaryCard(
-      "总请求",
-      int(s.requests),
-      [
-        summaryLine("成功", int(s.requests - s.failed)),
-        summaryLine("失败", int(s.failed)),
-        summaryLine("成功率", percent(s.success_rate, 2)),
-        summaryLine("平均延迟", latency(s.avg_latency_ms))
-      ],
-      sparkline(series((p) => p.requests), accent)
-    ),
-    summaryCard(
-      "总 Token",
-      tokens(s.total_tokens),
-      [
-        summaryLine("非缓存输入", tokens(s.input_tokens)),
-        summaryLine("缓存读取", tokens(s.cache_read_tokens)),
-        summaryLine("缓存写入", tokens(s.cache_write_tokens)),
-        summaryLine("输出（含推理）", tokens(s.output_tokens) + (s.reasoning_tokens ? ` (${tokens(s.reasoning_tokens)})` : ""))
-      ],
-      sparkline(series((p) => p.total_tokens), accent)
-    ),
-    summaryCard(
-      "缓存命中率",
-      percent(s.cache_rate, 2),
-      [
-        summaryLine("缓存读取", tokens(s.cache_read_tokens)),
-        summaryLine("总输入", tokens(s.input_tokens + s.cache_read_tokens + s.cache_write_tokens)),
-        summaryLine(bucket === "hour" ? "小时峰值" : "日峰值", percent(Math.max(0, ...series((p) => p.cache_rate)), 2))
-      ],
-      sparkline(series((p) => p.cache_rate), accent, { fit: true })
-    ),
-    summaryCard(
-      "总费用",
-      usd(s.cost),
-      [
-        summaryLine("输入", usd(s.cost_input)),
-        summaryLine("缓存读取", usd(s.cost_cache_read)),
-        summaryLine("缓存写入", usd(s.cost_cache_write)),
-        summaryLine("输出", usd(s.cost_output)),
-        s.unpriced > 0 && el("div", { class: "summary-line" }, el("span", { class: "tag warn", text: `${int(s.unpriced)} 次请求未定价` }))
-      ],
-      sparkline(series((p) => p.cost), accent)
-    )
-  );
-}
-
-const TREND_METRICS = {
-  tokens: {
-    label: "Token",
-    format: tokens,
-    series: () => [
-      ["非缓存输入", (p) => p.input_tokens, seriesColor(3)],
-      ["缓存读取", (p) => p.cache_read_tokens, seriesColor(1)],
-      ["缓存写入", (p) => p.cache_write_tokens, seriesColor(7)],
-      ["输出", (p) => p.output_tokens, seriesColor(4)]
-    ]
-  },
-  requests: {
-    label: "请求",
-    format: int,
-    series: () => [
-      ["成功", (p) => p.requests - p.failed, seriesColor(3)],
-      ["失败", (p) => p.failed, cssVar("--bad-text")]
-    ]
-  },
-  cost: {
-    label: "费用",
-    format: usd,
-    series: () => [
-      ["非缓存输入", (p) => p.cost_input, seriesColor(3)],
-      ["缓存读取", (p) => p.cost_cache_read, seriesColor(1)],
-      ["缓存写入", (p) => p.cost_cache_write, seriesColor(7)],
-      ["输出", (p) => p.cost_output, seriesColor(4)]
-    ]
-  }
+const CATEGORY_SERIES = {
+  total_tokens: [["非缓存输入", (p) => p.input_tokens, 3], ["缓存读取", (p) => p.cache_read_tokens, 1], ["缓存写入", (p) => p.cache_write_tokens, 7], ["输出", (p) => p.output_tokens, 4]],
+  requests: [["成功", (p) => p.requests - p.failed, 3], ["失败", (p) => p.failed, "bad"]],
+  cost: [["非缓存输入", (p) => p.cost_input, 3], ["缓存读取", (p) => p.cost_cache_read, 1], ["缓存写入", (p) => p.cost_cache_write, 7], ["输出", (p) => p.cost_output, 4]]
 };
 
-const trendSelect = segmented({ label: "趋势指标", onChange: (value) => {
-  view.trendMetric = value;
-  savePref("trend-metric", value);
-  renderTrend(view.data);
-} });
-
-function renderTrend({ trend, bucket }) {
-  const metricKey = TREND_METRICS[view.trendMetric] ? view.trendMetric : "tokens";
-  const metric = TREND_METRICS[metricKey];
-  const hidden = (view.hiddenSeries[metricKey] ||= new Set());
-  const surface = cssVar("--surface-strong");
-  const datasets = metric
-    .series()
-    .filter(([, pick]) => trend.some((point) => pick(point) > 0))
-    .map(([label, pick, color]) => ({
-      label,
-      data: trend.map(pick),
-      hidden: hidden.has(label),
-      backgroundColor: `color-mix(in srgb, ${color} 85%, ${surface})`,
-      hoverBackgroundColor: color,
-      borderWidth: 0,
-      maxBarThickness: 56,
-      categoryPercentage: 0.72,
-      barPercentage: 0.9
+function trendDatasets(data, metric, group) {
+  if (group === "category" || data.trend_by !== group) {
+    return CATEGORY_SERIES[metric]
+      .filter(([, pick]) => data.trend.some((point) => pick(point) > 0))
+      .map(([label, pick, slot]) => ({ label, data: data.trend.map(pick), color: slot === "bad" ? cssVar("--bad-text") : seriesColor(slot) }));
+  }
+  const rows = data.distribution[group];
+  return data.trend_series
+    .filter((series) => series[metric].some((value) => value > 0))
+    .map((series) => ({
+      label: series.others ? `其他 ${series.others} 项` : dimensionLabel(group, series.key),
+      data: series[metric],
+      color: series.others ? cssVar("--series-other") : entityColor(group, series.key, rows)
     }));
-  trendSelect.update(Object.entries(TREND_METRICS).map(([value, item]) => ({ value, label: item.label })), metricKey);
+}
+
+const trendMetricSelect = segmented({
+  label: "趋势指标",
+  onChange: (value) => {
+    view.trendMetric = value;
+    savePref("trend-metric", value);
+    renderTrend(view.data);
+  }
+});
+const trendGroupSelect = select({
+  label: "趋势分组",
+  align: "end",
+  onChange: (value) => {
+    view.trendGroup = value;
+    savePref("trend-group", value);
+    loadAnalysis({ interactive: true }).catch(console.error);
+  }
+});
+const bucketSelect = select({
+  label: "统计粒度",
+  align: "end",
+  options: [{ value: "hour", label: "按小时" }, { value: "day", label: "按天" }],
+  onChange: (value) => {
+    view.bucket = value;
+    savePref("trend-bucket", value);
+    loadAnalysis({ interactive: true }).catch(console.error);
+  }
+});
+
+function renderTrend(data) {
+  const metric = view.trendMetric, group = trendGroup(), { format } = METRICS[metric];
+  const hidden = (view.hidden[metric + group] ||= new Set());
+  const surface = cssVar("--surface-strong");
+  const datasets = trendDatasets(data, metric, group).map(({ label, data: values, color }) => ({
+    label,
+    data: values,
+    hidden: hidden.has(label),
+    backgroundColor: `color-mix(in srgb, ${color} 85%, ${surface})`,
+    hoverBackgroundColor: color,
+    borderWidth: 0,
+    maxBarThickness: 44,
+    categoryPercentage: 0.74,
+    barPercentage: 0.92
+  }));
+  trendMetricSelect.update(Object.entries(METRICS).map(([value, item]) => ({ value, label: item.label })), metric);
+  trendGroupSelect.update([{ value: "category", label: "按类别" }, ...Object.entries(dimensions()).map(([value, label]) => ({ value, label: joinText("按", label) }))], group);
+  const { from, to } = selectedRange();
+  const span = (to || Date.now()) - (from || data.trend[0]?.time || Date.now());
+  bucketSelect.element.classList.toggle("hidden", span > MONTH);
+  bucketSelect.update([{ value: "hour", label: "按小时" }, { value: "day", label: "按天" }], data.bucket);
   $("trend-legend").replaceChildren(datasets.length > 1 ? toggleLegend("trend-chart", datasets, hidden) : "");
   const sum = (items) => items.reduce((total, item) => total + Number(item.raw || 0), 0);
   drawChart(
@@ -172,84 +170,122 @@ function renderTrend({ trend, bucket }) {
     {
       type: "bar",
       plugins: [roundedStacks],
-      data: { labels: trend.map((point) => bucketLabel(point.time, bucket)), datasets },
+      data: { labels: data.trend.map((point) => bucketLabel(point.time, data.bucket)), datasets },
       options: timeSeriesOptions({
         stacked: true,
         tooltip: {
+          filter: (item) => item.raw > 0,
+          itemSort: (a, b) => b.raw - a.raw,
           callbacks: {
-            label: (item) => `${item.dataset.label}：${metric.format(item.raw)}`,
-            footer: (items) => (items.length > 1 ? "合计：" + metric.format(sum(items)) : "")
+            label: (item) => `${item.dataset.label}：${format(item.raw)}`,
+            footer: (items) => (items.length > 1 ? "合计：" + format(sum(items)) : "")
           }
         },
-        y: { beginAtZero: true, grace: "12%", ticks: { precision: metricKey === "requests" ? 0 : undefined, callback: (value) => metric.format(value) } }
+        y: { beginAtZero: true, grace: "8%", ticks: { precision: metric === "requests" ? 0 : undefined, callback: (value) => format(value) } }
       })
     },
     datasets.length ? "" : "所选范围内没有数据"
   );
 }
 
-const DIMENSIONS = { models: "模型", agents: "Agent", projects: "项目", providers: "提供商" };
-const DISTRIBUTION_METRICS = {
-  total_tokens: { label: "Token", option: "Token 占比", format: (row) => tokens(row.total_tokens) },
-  requests: { label: "请求", option: "请求占比", format: (row) => int(row.requests) },
-  cost: { label: "费用", option: "费用占比", format: (row) => usd(row.cost) }
-};
-const dimensionSelect = segmented({ label: "分布维度", onChange: (value) => {
-  view.dimension = value;
-  savePref("distribution-dimension", value);
-  renderDistribution(view.data);
-} });
+// Breakdowns load once per analysis load, when first shown.
+function breakdown(dimension, key, by) {
+  const cacheKey = [dimension, key, by].join("\0");
+  if (!view.breakdowns.has(cacheKey)) {
+    const params = new URLSearchParams(view.params);
+    for (const name of ["bucket", "trend_by", "speed_model"]) params.delete(name);
+    params.set("dimension", dimension);
+    params.set("key", key);
+    params.set("by", by);
+    const pending = api("GET", "/api/breakdown?" + params).then((result) => result.rows);
+    pending.catch(() => view.breakdowns.delete(cacheKey));
+    view.breakdowns.set(cacheKey, pending);
+  }
+  return view.breakdowns.get(cacheKey);
+}
+
+function nameCell(dimension, row, { path = true } = {}) {
+  if (row.total) return el("strong", { text: "合计" });
+  if (dimension === "agents") return agentTag(row.key);
+  const label = dimensionLabel(dimension, row.key);
+  if (dimension === "projects" && path && row.key) return [el("div", { class: "cell-line", text: label }), el("div", { class: "cell-sub", text: shortPath(row.key) })];
+  return el("span", { class: dimension === "models" ? "mono" : null, text: label });
+}
+
+function totals(rows, extra = {}) {
+  const total = { total: true, key: "", speed: {}, ...extra };
+  for (const field of ["requests", "failed", "input_tokens", "cache_read_tokens", "cache_write_tokens", "output_tokens", "total_tokens", "cost"])
+    total[field] = rows.reduce((sum, row) => sum + row[field], 0);
+  return total;
+}
+
+function breakdownTable(rows, by, compact = false) {
+  return dataTable({
+    class: "breakdown-table" + (compact ? " compact" : ""),
+    columns: [
+      { id: "name", label: DIMENSIONS[by], sort: (row) => (row.total ? null : dimensionLabel(by, row.key)), cell: (row) => nameCell(by, row, { path: !compact }) },
+      numberColumn("requests", "请求", int),
+      numberColumn("total_tokens", "Token", tokens),
+      numberColumn("cache_rate", "缓存命中率", (value) => percent(value, 1), cacheRate),
+      !compact && numberColumn("tps", "TPS", tps, (row) => row.speed.tps || null),
+      numberColumn("cost", "费用", usd)
+    ].filter(Boolean),
+    rows,
+    footer: rows.length > 1 && totals(rows),
+    sortPref: "breakdown-sort",
+    initialSort: { key: "cost", order: "desc" }
+  });
+}
+
+const breakdownTitle = (label, by) => [el("span", { text: label }), el("span", { class: "tip-caption", text: joinText("按", DIMENSIONS[by]) })];
+
+// The tip content of an entity: its usage split by another dimension.
+const breakdownTip = (dimension, row, label) => () =>
+  breakdown(dimension, row.key, breakdownBy(dimension)).then((rows) => [
+    el("div", { class: "tip-title" }, breakdownTitle(label, breakdownBy(dimension))),
+    el("div", { class: "tip-scroll", tabindex: "-1" }, breakdownTable(rows, breakdownBy(dimension), true))
+  ]);
+
+const dimensionSelect = segmented({
+  label: "分布维度",
+  onChange: (value) => {
+    view.dimension = value;
+    savePref("distribution-dimension", value);
+    renderDistribution(view.data);
+  }
+});
 const distributionSelect = select({
   label: "分布指标",
+  align: "end",
   onChange: (value) => {
     view.metric = value;
     savePref("distribution-metric", value);
     renderDistribution(view.data);
   }
 });
-const USAGE_FIELDS = ["requests", "failed", "input_tokens", "cache_read_tokens", "cache_write_tokens", "output_tokens", "total_tokens", "cost"];
 
-function dimensionLabel(dimension, key) {
-  if (dimension === "agents") return agentName(key);
-  if (dimension === "projects") return projectName(key) || "未知项目";
-  return key || (dimension === "models" ? "未知模型" : "未知");
-}
-
-// Colors follow entities, not the selected metric: agents keep their own
-// slot; models, projects and providers take slots by total tokens, and those
-// past the sixth share one "other" entry.
+// The six largest entities and the rest as one entry; agents are listed in
+// their color order.
 function distributionRows(rows, dimension, metric) {
   let colored;
   if (dimension === "agents") {
-    colored = rows
-      .map((row) => ({ ...row, slot: agentSlot(row.key) }))
-      .sort((a, b) => (a.slot || 9) - (b.slot || 9))
-      .map((row) => ({ ...row, color: row.slot ? seriesColor(row.slot) : cssVar("--series-other") }));
+    colored = rows.map((row) => ({ ...row, color: agentColor(row.key) }));
   } else {
-    colored = rows.slice(0, 6).map((row, index) => ({ ...row, color: seriesColor(index + 1) }));
-    const rest = rows.slice(6);
-    if (rest.length) {
-      const other = { key: "", label: `其他 ${rest.length} 项`, color: cssVar("--series-other") };
-      for (const field of USAGE_FIELDS) other[field] = rest.reduce((sum, row) => sum + row[field], 0);
-      colored.push(other);
-    }
+    const shown = rows.length <= 7 ? rows : rows.slice(0, 6);
+    colored = shown.map((row) => ({ ...row, color: entityColor(dimension, row.key, rows) }));
+    const rest = rows.slice(shown.length);
+    if (rest.length) colored.push({ ...totals(rest, { total: false }), others: rest.length, label: `其他 ${rest.length} 项`, color: cssVar("--series-other") });
   }
   const total = colored.reduce((sum, row) => sum + row[metric], 0);
-  return colored.map((row) => ({
-    ...row,
-    label: row.label || dimensionLabel(dimension, row.key),
-    percent: total > 0 ? (row[metric] * 100) / total : 0
-  }));
+  return colored.map((row) => ({ ...row, label: row.label || dimensionLabel(dimension, row.key), percent: total > 0 ? (row[metric] * 100) / total : 0 }));
 }
 
 function renderDistribution(data) {
-  const dimensions = { ...DIMENSIONS };
-  if (state.agent) delete dimensions.agents;
-  const dimension = dimensions[view.dimension] ? view.dimension : "models";
-  const metric = DISTRIBUTION_METRICS[view.metric] ? view.metric : "total_tokens";
-  const rows = distributionRows(data.distribution[dimension], dimension, metric).filter((row) => row.requests > 0);
-  dimensionSelect.update(Object.entries(dimensions).map(([value, label]) => ({ value, label })), dimension);
-  distributionSelect.update(Object.entries(DISTRIBUTION_METRICS).map(([value, item]) => ({ value, label: item.option })), metric);
+  const dimension = validDimension(view.dimension);
+  const metric = view.metric;
+  const rows = distributionRows(data.distribution[dimension], dimension, metric);
+  dimensionSelect.update(Object.entries(dimensions()).map(([value, label]) => ({ value, label })), dimension);
+  distributionSelect.update(Object.entries(METRICS).map(([value, item]) => ({ value, label: item.option })), metric);
   $("distribution-list").replaceChildren(
     ...rows.map((row) =>
       el(
@@ -262,48 +298,46 @@ function renderDistribution(data) {
             "span",
             { class: "name" },
             el("i", { class: "distribution-key" }),
-            el("span", { text: row.label, tip: dimension === "projects" && row.key ? shortPath(row.key) : null })
+            row.others ? el("span", { text: row.label }) : tip(el("span", { class: "has-tip", text: row.label }), breakdownTip(dimension, row, row.label))
           ),
-          el("strong", { class: "mono", text: percent(row.percent, 2) })
+          el("strong", { class: "distribution-percent", text: percent(row.percent, 2) })
         ),
         el("div", { class: "distribution-track" }, el("i", { style: { width: row.percent + "%" } })),
         el(
           "div",
           { class: "distribution-metrics" },
-          Object.entries(DISTRIBUTION_METRICS).map(([key, item]) => el("span", { class: key === metric ? "active" : "", text: item.label + " " + item.format(row) }))
+          Object.entries(METRICS).map(([key, item]) => el("span", { class: "distribution-tag" + (key === metric ? " active" : ""), text: item.label + " " + item.format(row[key]) }))
         )
       )
     )
   );
+  const total = rows.reduce((sum, row) => sum + row[metric], 0);
+  $("distribution-center").replaceChildren(el("strong", { text: METRICS[metric].format(total) }), el("span", { text: METRICS[metric].total }));
   let empty = "";
   if (!rows.length) empty = "所选范围内没有请求事件";
-  else if (!rows.some((row) => row.percent > 0)) empty = `所选范围内${DISTRIBUTION_METRICS[metric].label}为 0`;
+  else if (!(total > 0)) empty = joinText("所选范围内", joinText(METRICS[metric].label, "为 0"));
+  $("distribution-center").classList.toggle("hidden", !!empty);
   drawChart(
     "distribution-chart",
     {
       type: "doughnut",
       data: {
         labels: rows.map((row) => row.label),
-        datasets: [
-          { data: rows.map((row) => row.percent), backgroundColor: rows.map((row) => row.color), borderColor: cssVar("--surface-strong"), borderWidth: 2, hoverOffset: 6 }
-        ]
+        datasets: [{ data: rows.map((row) => row.percent), backgroundColor: rows.map((row) => row.color), borderColor: cssVar("--surface-strong"), borderWidth: 2, borderRadius: 4, hoverOffset: 6 }]
       },
       options: {
         responsive: true,
         maintainAspectRatio: false,
-        cutout: "64%",
+        cutout: "68%",
         layout: { padding: 8 },
         plugins: {
           legend: { display: false },
           tooltip: tooltipStyle({
             callbacks: {
-              title: (items) => `${dimensions[dimension]}：${items[0].label}`,
+              title: (items) => `${DIMENSIONS[dimension]}：${items[0].label}`,
               label: (item) => {
                 const row = rows[item.dataIndex];
-                return [
-                  `${DISTRIBUTION_METRICS[metric].option} ${percent(row.percent, 2)}`,
-                  ...Object.values(DISTRIBUTION_METRICS).map((entry) => `${entry.label} ${entry.format(row)}`)
-                ];
+                return [`${METRICS[metric].option} ${percent(row.percent, 2)}`, ...Object.entries(METRICS).map(([key, entry]) => `${entry.label} ${entry.format(row[key])}`)];
               }
             }
           })
@@ -312,6 +346,84 @@ function renderDistribution(data) {
     },
     empty
   );
+}
+
+const statsSelect = segmented({
+  label: "明细维度",
+  onChange: (value) => {
+    view.tableDimension = value;
+    savePref("stats-dimension", value);
+    renderStats(view.data);
+  }
+});
+
+const failureRate = (row) => (row.requests ? (row.failed * 100) / row.requests : null);
+const speedValue = (field) => (row) => row.speed[field] || null;
+
+function renderStats(data) {
+  const dimension = validDimension(view.tableDimension);
+  statsSelect.update(Object.entries(dimensions()).map(([value, label]) => ({ value, label })), dimension);
+  const rows = data.distribution[dimension];
+  $("stats-table").replaceChildren(
+    rows.length
+      ? dataTable({
+          class: "stats-table",
+          columns: [
+            { id: "name", label: DIMENSIONS[dimension], sort: (row) => (row.total ? null : dimensionLabel(dimension, row.key)), cell: (row) => nameCell(dimension, row) },
+            numberColumn("requests", "请求", int),
+            numberColumn("failure", "失败率", (value) => (value == null ? "—" : percent(value, 1)), failureRate),
+            numberColumn("input", "输入", tokens, promptTokens),
+            numberColumn("output_tokens", "输出", tokens),
+            numberColumn("cache_rate", "缓存命中率", (value) => percent(value, 1), cacheRate),
+            numberColumn("cost", "费用", usd),
+            numberColumn("tps", "TPS", tps, speedValue("tps")),
+            numberColumn("ttft", "首字", latency, speedValue("ttft_ms")),
+            numberColumn("latency", "耗时", latency, speedValue("latency_ms")),
+            numberColumn("latency_p95", "P95 耗时", latency, speedValue("latency_p95_ms")),
+            {
+              id: "detail",
+              label: "",
+              className: "detail-cell",
+              cell: (row) => !row.total && el("button", { class: "link", type: "button", text: "详情", "aria-label": "用量拆分：" + dimensionLabel(dimension, row.key), onclick: () => openBreakdown(dimension, row) })
+            }
+          ],
+          rows,
+          footer: rows.length > 1 && totals(rows),
+          sortPref: "stats-sort",
+          initialSort: { key: "cost", order: "desc" },
+          onRow: (row) => openBreakdown(dimension, row)
+        })
+      : el("div", { class: "empty", text: "所选范围内没有请求事件" })
+  );
+}
+
+// The dialog splitting one entity's usage by another dimension.
+function openBreakdown(dimension, row) {
+  hideTip();
+  const label = dimensionLabel(dimension, row.key);
+  const dialog = $("breakdown-dialog"), body = $("breakdown-body");
+  const others = Object.entries(dimensions()).filter(([value]) => value !== dimension);
+  let by = breakdownBy(dimension);
+  const bySelect = segmented({
+    label: "拆分维度",
+    value: by,
+    options: others.map(([value, name]) => ({ value, label: joinText("按", name) })),
+    onChange: (value) => show((by = value))
+  });
+  $("breakdown-title").replaceChildren(el("span", { text: label }), el("span", { class: "tip-caption", text: joinText(DIMENSIONS[dimension], "用量拆分") }));
+  $("breakdown-controls").replaceChildren(bySelect.element);
+  async function show(target) {
+    const loading = el("div", { class: "empty", text: "正在加载…" });
+    body.replaceChildren(loading);
+    try {
+      const rows = await breakdown(dimension, row.key, target);
+      if (dialog.open && loading.isConnected) body.replaceChildren(breakdownTable(rows, target));
+    } catch (error) {
+      if (dialog.open && loading.isConnected) loading.textContent = error.message;
+    }
+  }
+  if (!dialog.open) dialog.showModal();
+  show(by);
 }
 
 const tpsLabel = (value) => Number(value || 0).toFixed(1) + " t/s";
@@ -331,8 +443,13 @@ function speedAxis(points) {
 }
 
 const speedSelect = select({
-  label: "速度趋势模型", searchable: true,
-  onChange: (value) => { view.speedModel = value; loadAnalysis(); }
+  label: "模型",
+  searchable: true,
+  align: "end",
+  onChange: (value) => {
+    view.speedModel = value;
+    loadAnalysis({ interactive: true }).catch(console.error);
+  }
 });
 
 function renderSpeed({ speed_models: models, speed_model: model, speed: stats, speed_trend: points, bucket }) {
@@ -366,10 +483,11 @@ function renderSpeed({ speed_models: models, speed_model: model, speed: stats, s
             borderColor: colors.median,
             backgroundColor: colors.median,
             borderWidth: 2,
-            pointRadius: 4,
-            pointHoverRadius: 6,
+            pointRadius: points.length > 48 ? 0 : 3.5,
+            pointHoverRadius: 5,
             pointBorderColor: surface,
             pointBorderWidth: 2,
+            spanGaps: true,
             cubicInterpolationMode: "monotone"
           },
           {
@@ -407,7 +525,10 @@ function renderSpeed({ speed_models: models, speed_model: model, speed: stats, s
 }
 
 export function initAnalysis() {
-  $("trend-controls").append(trendSelect.element);
+  $("trend-controls").append(trendMetricSelect.element, trendGroupSelect.element, bucketSelect.element);
   $("distribution-controls").append(dimensionSelect.element, distributionSelect.element);
+  $("stats-controls").append(statsSelect.element);
   $("speed-controls").append(speedSelect.element);
+  $("close-breakdown").replaceChildren(icon("x"));
+  $("close-breakdown").addEventListener("click", () => $("breakdown-dialog").close());
 }

@@ -1,20 +1,18 @@
-import { $, el, tip, hideTip } from "./dom.js";
+// The model prices tab and the price dialog.
+import { $, el, icon } from "./dom.js";
+import { tip, hideTip } from "./tooltip.js";
 import { segmented } from "./controls.js";
-import { api, state, pref, savePref, int, rate, tokens, priceSource } from "./core.js";
+import { api, state, pref, savePref, int, rate, tokens, priceSource, agentName, dateTime } from "./core.js";
+import { dataTable } from "./data-table.js";
 
-const RATES = [
-  ["input", "输入"],
-  ["output", "输出"],
-  ["cache_read", "缓存读"],
-  ["cache_write", "缓存写"]
-];
-
+const RATES = [["input", "输入"], ["output", "输出"], ["cache_read", "缓存读"], ["cache_write", "缓存写"]];
 const STATUSES = { all: "全部", unpriced: "未定价", custom: "自定义", reference: "参考价" };
 const view = {
   data: null,
   sequence: 0,
   filters: pref("price-filters", { query: "", status: "all" }),
   editing: null,
+  onSaved: null,
   searchTimer: 0,
   searchSequence: 0
 };
@@ -28,20 +26,63 @@ export async function loadPrices() {
   renderPrices();
 }
 
+export function setPriceStatus(status) {
+  $("prices-query").value = "";
+  setFilters({ query: "", status });
+}
+
 const ownCustom = (price) => price?.source === "custom" && !price.as;
-const priceStatus = (price) => !price ? "unpriced" : price.source === "custom" ? "custom" : "reference";
+const priceStatus = (price) => (!price ? "unpriced" : price.source === "custom" ? "custom" : "reference");
 
 function sourceTag(price) {
   if (!price) return el("span", { class: "tag warn", text: "未定价" });
-  return el("span", { class: "tag " + (price.source === "custom" ? "info" : "ok"), text: price.source === "custom" ? "自定义" : "models.dev", tip: priceSource(price) });
+  return tip(el("span", { class: "tag " + (price.source === "custom" ? "info" : "ok"), text: price.source === "custom" ? "自定义" : "models.dev" }), priceSource(price));
 }
+
+const tiers = (price) => [price, price?.long_context].filter(Boolean);
+const rateCell = (key) => (row) => (tiers(row.price).length ? tiers(row.price).map((tier) => el("div", { text: tier[key] == null ? "—" : rate(tier[key]) })) : "—");
+
+const COLUMNS = [
+  {
+    id: "model",
+    label: "模型",
+    sort: (row) => row.model,
+    cell: (row) => [el("div", { class: "cell-line mono", text: row.model }), el("div", { class: "cell-sub", text: row.agents.map(agentName).join(" · ") })]
+  },
+  { id: "requests", label: "请求", num: true, sort: (row) => row.requests, cell: (row) => int(row.requests) },
+  { id: "total_tokens", label: "Token", num: true, sort: (row) => row.total_tokens, cell: (row) => tokens(row.total_tokens) },
+  {
+    id: "context",
+    label: "上下文",
+    className: "muted",
+    cell: (row) => row.price?.long_context && [el("div", { text: "≤ " + tokens(row.price.long_context.threshold) }), el("div", { text: "> " + tokens(row.price.long_context.threshold) })]
+  },
+  ...RATES.map(([key, label]) => ({ id: key, label: label + " $/M", num: true, sort: (row) => row.price?.[key] ?? null, cell: rateCell(key) })),
+  {
+    id: "source",
+    label: "来源",
+    sort: (row) => ["unpriced", "custom", "reference"].indexOf(priceStatus(row.price)),
+    cell: (row) => [sourceTag(row.price), row.price?.as && el("div", { class: "cell-sub", text: `按 ${row.price.as} 计价` })]
+  },
+  {
+    id: "actions",
+    label: "",
+    className: "actions-cell",
+    cell: (row) =>
+      el(
+        "div",
+        { class: "price-actions" },
+        el("button", { class: "link", type: "button", text: row.price ? "编辑" : "设置价格", onclick: () => openPriceDialog(row) }),
+        ownCustom(row.price) && el("button", { class: "link danger", type: "button", text: "重置", onclick: () => resetPrice(row) })
+      )
+  }
+];
 
 function renderPrices() {
   if (!view.data) return;
   hideTip();
   const { models, catalog } = view.data;
-  const fetched = catalog.fetched_at ? new Date(catalog.fetched_at).toLocaleString("zh-CN", { hour12: false }) : "未获取";
-  tip($("catalog-refresh"), `models.dev 参考价：${fetched}` + (catalog.error ? `\n上次更新失败：${catalog.error}` : ""));
+  tip($("catalog-refresh"), `models.dev 参考价：${catalog.fetched_at ? dateTime(new Date(catalog.fetched_at).getTime()) + " 更新" : "未获取"}` + (catalog.error ? `\n上次更新失败：${catalog.error}` : ""));
   const scope = models.filter((row) => !state.agent || row.agents.includes(state.agent));
   const words = view.filters.query.toLowerCase().trim().split(/\s+/).filter(Boolean);
   const matches = scope.filter(({ model, price }) => {
@@ -53,37 +94,47 @@ function renderPrices() {
   for (const row of matches) counts[priceStatus(row.price)]++;
   statusSelect.update(Object.entries(STATUSES).map(([value, label]) => ({ value, label, detail: int(counts[value]) })), status);
   const rows = matches.filter((row) => status === "all" || priceStatus(row.price) === status);
-  $("prices-table").querySelector("tbody").replaceChildren(...rows.map(priceRow));
-  $("prices-empty").classList.toggle("hidden", rows.length > 0);
-  $("prices-empty").textContent = !scope.length ? "暂无模型记录" : !words.length && status === "unpriced" ? "没有未定价模型" : "没有符合条件的模型";
-  $("prices-note").textContent = rows.length === scope.length ? `共 ${int(scope.length)} 个模型` : `显示 ${int(rows.length)} / ${int(scope.length)} 个模型`;
-}
-
-function priceRow(row) {
-  const { model, price } = row;
-  const long = price?.long_context;
-  const tiers = [price, long].filter(Boolean);
-  return el("tr", {},
-    el("td", { class: "mono", text: model }),
-    el("td", { class: "muted" }, long && [el("div", { text: "≤ " + tokens(long.threshold) }), el("div", { text: "> " + tokens(long.threshold) })]),
-    RATES.map(([key]) => el("td", { class: "num" }, tiers.length ? tiers.map((tier) => el("div", { text: tier[key] == null ? "—" : rate(tier[key]) })) : "—")),
-    el("td", {}, sourceTag(price), price?.as && el("div", { class: "cell-sub", text: `按 ${price.as} 计价` })),
-    el("td", {}, el("div", { class: "price-actions" },
-      el("button", { class: "link", type: "button", text: price ? "编辑" : "设置价格", onclick: () => openPriceDialog(row) }),
-      ownCustom(price) && el("button", { class: "link danger", type: "button", text: "重置", onclick: () => resetPrice(row) })
-    ))
+  $("prices-table").replaceChildren(
+    dataTable({ id: "prices-grid", columns: COLUMNS, rows, sortPref: "price-sort", initialSort: { key: "requests", order: "desc" } })
   );
+  $("prices-empty").classList.toggle("hidden", rows.length > 0);
+  const EMPTY = { unpriced: "所有模型都已定价", custom: "没有设置自定义价格的模型" };
+  $("prices-empty").textContent = !scope.length ? "暂无模型记录" : (!words.length && EMPTY[status]) || "没有符合条件的模型";
+  $("prices-note").textContent = rows.length === scope.length ? `共 ${int(scope.length)} 个模型` : `显示 ${int(rows.length)} / ${int(scope.length)} 个模型`;
 }
 
 function setFilters(filters) {
   view.filters = filters;
   savePref("price-filters", filters);
-  $("prices-table").parentElement.scrollTop = 0;
+  $("prices-wrap").scrollTop = 0;
   renderPrices();
 }
 
 async function resetPrice(row) {
-  if (confirm(`删除「${row.model}」的自定义价格？`)) await api("DELETE", "/api/prices?model=" + encodeURIComponent(row.model));
+  const confirmed = await confirmAction({ title: "重置价格", message: `删除「${row.model}」的自定义价格？`, action: "重置" });
+  if (!confirmed) return;
+  try {
+    await api("DELETE", "/api/prices?model=" + encodeURIComponent(row.model));
+  } catch (error) {
+    showNote(error.message);
+  }
+}
+
+function showNote(message) {
+  $("prices-error").textContent = message;
+  $("prices-error").classList.toggle("hidden", !message);
+}
+
+// A themed confirmation; resolves true when the action is chosen.
+export function confirmAction({ title, message, action }) {
+  const dialog = $("confirm-dialog");
+  $("confirm-title").textContent = title;
+  $("confirm-message").textContent = message;
+  $("confirm-ok").textContent = action;
+  dialog.returnValue = "";
+  dialog.showModal();
+  $("confirm-cancel").focus();
+  return new Promise((resolve) => dialog.addEventListener("close", () => resolve(dialog.returnValue === "ok"), { once: true }));
 }
 
 function fillRates(rates) {
@@ -98,7 +149,9 @@ function fillRates(rates) {
 
 // A long-context threshold needs its own input and output rates.
 function requireLongRates() {
-  $("price-long-input").required = $("price-long-output").required = $("price-threshold").value !== "";
+  const long = $("price-threshold").value !== "";
+  $("price-long-input").required = $("price-long-output").required = long;
+  $("price-dialog").classList.toggle("has-long", long);
 }
 
 function readRates() {
@@ -110,14 +163,19 @@ function readRates() {
   return rates;
 }
 
-function openPriceDialog(row) {
+// row is { model, price }; onSaved runs after the price is stored.
+export function openPriceDialog(row, { onSaved = null } = {}) {
+  hideTip();
   view.editing = row;
+  view.onSaved = onSaved;
   $("price-model").textContent = row.model;
+  $("price-current").textContent = row.price ? "当前：" + priceSource(row.price) : "当前未定价";
   $("price-error").classList.add("hidden");
   $("price-search").value = "";
   clearReferenceSearch();
   fillRates(row.price);
   $("price-dialog").showModal();
+  $("price-search").focus();
 }
 
 function clearReferenceSearch() {
@@ -136,21 +194,24 @@ async function searchReference(query, sequence) {
   }
   if (sequence !== view.searchSequence) return;
   $("price-search-results").replaceChildren(
-    ...results.map((result) =>
-      el(
-        "button",
-        {
-          type: "button",
-          onclick: () => {
-            fillRates(result.rates);
-            $("price-search").value = `${result.provider}/${result.model_id}`;
-            clearReferenceSearch();
-          }
-        },
-        el("span", { class: "mono", text: `${result.provider}/${result.model_id}` }),
-        el("span", { class: "muted small", text: `${rate(result.rates.input)} / ${rate(result.rates.output)}` })
-      )
-    )
+    ...(results.length
+      ? results.map((result) =>
+          el(
+            "button",
+            {
+              type: "button",
+              onclick: () => {
+                fillRates(result.rates);
+                $("price-search").value = `${result.provider}/${result.model_id}`;
+                clearReferenceSearch();
+                $("price-input").focus();
+              }
+            },
+            el("span", { class: "mono", text: `${result.provider}/${result.model_id}` }),
+            el("span", { class: "muted small", text: `${rate(result.rates.input)} / ${rate(result.rates.output)}` })
+          )
+        )
+      : [el("div", { class: "search-empty", text: "没有匹配的参考价" })])
   );
 }
 
@@ -159,6 +220,7 @@ async function savePrice(event) {
   try {
     await api("PUT", "/api/prices", { model: view.editing.model, rates: readRates() });
     $("price-dialog").close();
+    view.onSaved?.();
   } catch (error) {
     $("price-error").textContent = error.message;
     $("price-error").classList.remove("hidden");
@@ -166,23 +228,22 @@ async function savePrice(event) {
 }
 
 export function initPrices() {
-  $("prices-table").querySelector("thead").append(el("tr", {},
-    el("th", { text: "模型" }), el("th", { text: "上下文" }),
-    RATES.map(([, label]) => el("th", { class: "num", text: label + " $/M" })),
-    el("th", { text: "来源" }), el("th", { "aria-label": "操作" })
-  ));
   $("prices-status").append(statusSelect.element);
   $("prices-query").value = view.filters.query;
   $("prices-query").addEventListener("input", (event) => setFilters({ ...view.filters, query: event.target.value }));
   const refresh = $("catalog-refresh");
+  refresh.replaceChildren(icon("rotate-cw"), "更新参考价");
   refresh.addEventListener("click", async () => {
     refresh.disabled = true;
+    refresh.classList.add("busy");
+    showNote("");
     try {
       await api("POST", "/api/prices/refresh");
     } catch (error) {
-      alert("更新失败：" + error.message);
+      showNote("更新参考价失败：" + error.message);
     } finally {
       refresh.disabled = false;
+      refresh.classList.remove("busy");
     }
   });
   $("price-form").addEventListener("submit", savePrice);
@@ -193,5 +254,9 @@ export function initPrices() {
     const sequence = clearReferenceSearch();
     const query = event.target.value.trim();
     if (query) view.searchTimer = setTimeout(() => searchReference(query, sequence), 250);
+  });
+  $("confirm-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    $("confirm-dialog").close(event.submitter?.value || "");
   });
 }

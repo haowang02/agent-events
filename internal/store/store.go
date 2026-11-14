@@ -174,9 +174,10 @@ func (s *Store) Save(events []event.Event, sources []collect.Source) (int64, err
 	return saved, tx.Commit()
 }
 
-// Events returns every event, newest first.
+// Events returns every event, newest first. Seq is the row ID, which an
+// upsert keeps, so it orders events by when they were first saved.
 func (s *Store) Events() ([]event.Event, error) {
-	rows, err := s.db.Query("SELECT " + strings.Join(eventColumns, ", ") + " FROM events ORDER BY time DESC, agent, id")
+	rows, err := s.db.Query("SELECT rowid, " + strings.Join(eventColumns, ", ") + " FROM events ORDER BY time DESC, agent, id")
 	if err != nil {
 		return nil, err
 	}
@@ -184,7 +185,7 @@ func (s *Store) Events() ([]event.Event, error) {
 	var events []event.Event
 	for rows.Next() {
 		var e event.Event
-		if err := rows.Scan(eventTargets(&e)...); err != nil {
+		if err := rows.Scan(append([]any{&e.Seq}, eventTargets(&e)...)...); err != nil {
 			return nil, err
 		}
 		events = append(events, e)
