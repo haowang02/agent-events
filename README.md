@@ -2,9 +2,9 @@
 
 在浏览器中查看本机 AI 编程助手的每一次模型请求：Token 用量、费用、速度和失败原因。
 
-![agent-events 项目最近 30 天的请求事件，浅色与深色主题](docs/images/screenshot.png)
+![agent-events 项目最近 30 天的请求事件](docs/images/screenshot.png)
 
-支持 Claude Code、Codex、OpenCode、Kilo Code、Antigravity、Gemini CLI、Qwen Code、GitHub Copilot CLI、Amp、Codebuff、Factory Droid、Goose、Grok Build、Hermes、Kimi、OpenClaw、Pi 和 ZCode。只读取本机日志，请求数据不会上传。
+支持 Claude Code、Codex、OpenCode、Kilo Code、Antigravity、Gemini CLI、Qwen Code、GitHub Copilot CLI、Amp、Codebuff、Factory Droid、Goose、Grok Build、Hermes、Kimi、OpenClaw、Pi 和 ZCode。
 
 ## 安装
 
