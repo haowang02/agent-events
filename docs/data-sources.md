@@ -18,7 +18,7 @@ agent-events 只读取各 Agent 写在本机的日志和数据库，不修改它
 | Codex | `~/.codex/sessions`、`~/.codex/archived_sessions` 下的 `rollout-*.jsonl` 及其 `.zst` 压缩版本 | `CODEX_HOME` | 一次请求 | 从用户消息或上一次工具调用完成到本次响应；每轮第一个请求有首字时间 |
 | OpenCode | `~/.local/share/opencode` 下的 `opencode.db`、`opencode-*.db` 和 `storage/message/**/*.json` | `OPENCODE_DATA_DIR`、`XDG_DATA_HOME` | 一次请求 | 从请求开始到响应结束，工具执行时间不计入 |
 | Kilo Code | `~/.local/share/kilo/kilo.db` | `KILO_DATA_DIR` | 一次请求 | 同 OpenCode |
-| Antigravity | `~/.gemini/antigravity`、`antigravity-cli`、`antigravity-ide`、`antigravity-backup`、`antigravity-acp` 和 `~/.config/antigravity` 下的 `conversations/*.db` | `ANTIGRAVITY_DATA_DIR` | 一次请求 | 记录中的生成耗时 |
+| Antigravity | `~/.gemini/antigravity`、`antigravity-cli`、`antigravity-ide`、`antigravity-backup`、`antigravity-acp` 和 `~/.config/antigravity` 下的 `conversations/*.db` | `ANTIGRAVITY_DATA_DIR` | 一次请求 | 首字耗时加后续生成耗时；任一阶段缺失时总耗时未知 |
 | Gemini CLI | `~/.gemini/tmp/*/chats/` 下的 `*.json`、`*.jsonl` | `GEMINI_DATA_DIR` | 一次请求 | — |
 | Qwen Code | `~/.qwen/projects/*/chats/*.jsonl` | `QWEN_DATA_DIR` | 一次请求 | — |
 | GitHub Copilot CLI | `~/.copilot/otel/**/*.jsonl`、`~/.copilot/session-state/*/events.jsonl` | `COPILOT_HOME`、`COPILOT_OTEL_FILE_EXPORTER_PATH` | OpenTelemetry 导出为一次请求，会话快照为会话汇总 | OpenTelemetry span 的起止时间 |

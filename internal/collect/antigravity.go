@@ -42,9 +42,11 @@ func antigravity() Collector {
 const (
 	antigravityGenRequest       = 1  // gen_metadata: the request
 	antigravityGenUsage         = 4  // request: ModelUsageStats
-	antigravityGenLatency       = 11 // request: google.protobuf.Duration
+	antigravityGenTTFT          = 11 // request: time to first response, google.protobuf.Duration
+	antigravityGenStreaming     = 12 // request: time from first response to completion, google.protobuf.Duration
 	antigravityGenModel         = 19 // request: model name
 	antigravityGenLabels        = 20 // request: repeated {1: key, 2: value}
+	antigravityGenDisplayName   = 21 // request: display name, e.g. "Gemini 4 Hydrogen (Medium)"
 	antigravityUsageModel       = 1  // usage: model enum
 	antigravityUsageInput       = 2  // usage: uncached input
 	antigravityUsageOutput      = 3  // usage: thinking + response output
@@ -117,6 +119,35 @@ type antigravityStep struct {
 	error   string
 }
 
+type antigravityModel struct {
+	name   string
+	effort string
+}
+
+func antigravityEffort(displayName, model string) string {
+	if strings.HasSuffix(displayName, ")") {
+		if open := strings.LastIndexByte(displayName, '('); open >= 0 {
+			if effort := normalizeAntigravityEffort(displayName[open+1 : len(displayName)-1]); effort != "" {
+				return effort
+			}
+		}
+	}
+	if last := strings.LastIndexByte(model, '-'); last >= 0 {
+		return normalizeAntigravityEffort(model[last+1:])
+	}
+	return ""
+}
+
+func normalizeAntigravityEffort(raw string) string {
+	effort := strings.ToLower(strings.TrimSpace(raw))
+	switch effort {
+	case "minimal", "low", "medium", "high", "xhigh", "max":
+		return effort
+	default:
+		return ""
+	}
+}
+
 // antigravitySteps returns model response steps by index, and their indexes
 // by the message ID of their usage.
 func antigravitySteps(db *sql.DB) (map[int64]antigravityStep, map[string]int64, error) {
@@ -164,9 +195,9 @@ func parseAntigravity(path string) ([]event.Event, error) {
 	var trajectory []byte
 	_ = db.QueryRow("SELECT data FROM trajectory_metadata_blob LIMIT 1").Scan(&trajectory)
 	project := strings.TrimPrefix(string(pbBytes(pbBytes(trajectory, antigravityWorkspace), 1)), "file://")
-	newEvent := func(id, model string, usage []byte) event.Event {
+	newEvent := func(id string, m antigravityModel, usage []byte) event.Event {
 		return event.Event{
-			Agent: "antigravity", ID: id, Model: model, Session: conversation, Project: project, Client: client, Source: path,
+			Agent: "antigravity", ID: id, Model: m.name, Effort: m.effort, Session: conversation, Project: project, Client: client, Source: path,
 			InputTokens:      pbVarint(usage, antigravityUsageInput),
 			CacheReadTokens:  pbVarint(usage, antigravityUsageCacheRead),
 			CacheWriteTokens: pbVarint(usage, antigravityUsageCacheWrite),
@@ -180,7 +211,7 @@ func parseAntigravity(path string) ([]event.Event, error) {
 		return nil, err
 	}
 	var events []event.Event
-	modelNames := map[int64]string{}
+	models := map[int64]antigravityModel{}
 	responded := map[int64]bool{}
 	err = scanRows(rows, func() error {
 		var index int64
@@ -198,7 +229,9 @@ func parseAntigravity(path string) ([]event.Event, error) {
 			labels[string(pbBytes(label, 1))] = string(pbBytes(label, 2))
 		}
 		model := string(pbBytes(request, antigravityGenModel))
-		modelNames[pbVarint(usage, antigravityUsageModel)] = model
+		displayName := string(pbBytes(request, antigravityGenDisplayName))
+		m := antigravityModel{name: model, effort: antigravityEffort(displayName, model)}
+		models[pbVarint(usage, antigravityUsageModel)] = m
 		stepIndex, ok := stepsByMessage[string(pbBytes(usage, antigravityUsageMessageID))]
 		if !ok {
 			// The response step follows the last step the request was built from.
@@ -210,9 +243,13 @@ func parseAntigravity(path string) ([]event.Event, error) {
 			return nil
 		}
 		responded[stepIndex] = true
-		e := newEvent(cmp.Or(labels["request_id"], conversation+":"+strconv.FormatInt(index, 10)), model, usage)
+		e := newEvent(cmp.Or(labels["request_id"], conversation+":"+strconv.FormatInt(index, 10)), m, usage)
 		e.Time = step.created
-		e.LatencyMS = pbMillis(pbBytes(request, antigravityGenLatency))
+		first, streaming := pbBytes(request, antigravityGenTTFT), pbBytes(request, antigravityGenStreaming)
+		e.TTFTMS = pbMillis(first)
+		if first != nil && streaming != nil {
+			e.LatencyMS = e.TTFTMS + pbMillis(streaming)
+		}
 		events = append(events, e)
 		return nil
 	})
@@ -223,7 +260,7 @@ func parseAntigravity(path string) ([]event.Event, error) {
 		if responded[index] || step.error == "" {
 			continue
 		}
-		e := newEvent(conversation+":step:"+strconv.FormatInt(index, 10), modelNames[step.model], step.usage)
+		e := newEvent(conversation+":step:"+strconv.FormatInt(index, 10), models[step.model], step.usage)
 		e.Time = step.created
 		e.Failed = true
 		e.Error = step.error
