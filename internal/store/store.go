@@ -15,46 +15,6 @@ import (
 	"github.com/haowang02/agent-events/internal/pricing"
 )
 
-const schema = `
-CREATE TABLE IF NOT EXISTS events (
-	agent TEXT NOT NULL,
-	id TEXT NOT NULL,
-	time INTEGER NOT NULL,
-	model TEXT NOT NULL DEFAULT '',
-	provider TEXT NOT NULL DEFAULT '',
-	session TEXT NOT NULL DEFAULT '',
-	project TEXT NOT NULL DEFAULT '',
-	client TEXT NOT NULL DEFAULT '',
-	kind TEXT NOT NULL DEFAULT '',
-	scope TEXT NOT NULL DEFAULT '',
-	effort TEXT NOT NULL DEFAULT '',
-	tier TEXT NOT NULL DEFAULT '',
-	input_tokens INTEGER NOT NULL DEFAULT 0,
-	cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-	cache_write_tokens INTEGER NOT NULL DEFAULT 0,
-	cache_write_1h_tokens INTEGER NOT NULL DEFAULT 0,
-	output_tokens INTEGER NOT NULL DEFAULT 0,
-	reasoning_tokens INTEGER NOT NULL DEFAULT 0,
-	latency_ms INTEGER NOT NULL DEFAULT 0,
-	ttft_ms INTEGER NOT NULL DEFAULT 0,
-	failed INTEGER NOT NULL DEFAULT 0,
-	error TEXT NOT NULL DEFAULT '',
-	stop TEXT NOT NULL DEFAULT '',
-	version TEXT NOT NULL DEFAULT '',
-	source TEXT NOT NULL DEFAULT '',
-	PRIMARY KEY (agent, id)
-);
-CREATE TABLE IF NOT EXISTS sources (
-	path TEXT PRIMARY KEY,
-	agent TEXT NOT NULL,
-	size INTEGER NOT NULL,
-	mtime INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS custom_prices (
-	model TEXT PRIMARY KEY,
-	rates TEXT NOT NULL
-);`
-
 var eventColumns = []string{
 	"agent", "id", "time", "model", "provider", "session", "project", "client", "kind", "scope", "effort", "tier",
 	"input_tokens", "cache_read_tokens", "cache_write_tokens", "cache_write_1h_tokens", "output_tokens", "reasoning_tokens",
@@ -80,8 +40,8 @@ func eventTargets(e *event.Event) []any {
 // The same request can be recorded in several sources: a resumed session's
 // new transcript, a fork that replays its parent, or a compressed copy. The
 // copy with timing information wins, then the earliest, which is the
-// original. Identical rows are left alone, so the affected count reports
-// real changes.
+// original. A source parsed again always updates its own copy. Identical rows
+// are left alone, so the affected count reports real changes.
 var upsertEventSQL = func() string {
 	var updates, existing, incoming []string
 	for _, column := range eventColumns[2:] {
@@ -91,7 +51,7 @@ var upsertEventSQL = func() string {
 	}
 	return fmt.Sprintf(
 		"INSERT INTO events (%s) VALUES (?%s) ON CONFLICT (agent, id) DO UPDATE SET %s WHERE "+
-			"((excluded.latency_ms > 0) > (events.latency_ms > 0) OR "+
+			"(excluded.source = events.source OR (excluded.latency_ms > 0) > (events.latency_ms > 0) OR "+
 			"(excluded.latency_ms > 0) = (events.latency_ms > 0) AND excluded.time <= events.time) AND (%s) IS NOT (%s)",
 		strings.Join(eventColumns, ", "), strings.Repeat(", ?", len(eventColumns)-1), strings.Join(updates, ", "),
 		strings.Join(existing, ", "), strings.Join(incoming, ", "),
@@ -106,7 +66,7 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(schema); err != nil {
+	if err := migrate(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("initialize %s: %w", path, err)
 	}
@@ -115,15 +75,8 @@ func Open(path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-// Reset discards collected events so that every source is parsed again.
-// Custom prices are kept.
-func (s *Store) Reset() error {
-	_, err := s.db.Exec("DELETE FROM events; DELETE FROM sources;")
-	return err
-}
-
 func (s *Store) Sources() (map[string]collect.Source, error) {
-	rows, err := s.db.Query("SELECT path, agent, size, mtime FROM sources")
+	rows, err := s.db.Query("SELECT path, agent, size, mtime, parser FROM sources")
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +84,7 @@ func (s *Store) Sources() (map[string]collect.Source, error) {
 	sources := make(map[string]collect.Source)
 	for rows.Next() {
 		var source collect.Source
-		if err := rows.Scan(&source.Path, &source.Agent, &source.Size, &source.MTime); err != nil {
+		if err := rows.Scan(&source.Path, &source.Agent, &source.Size, &source.MTime, &source.Parser); err != nil {
 			return nil, err
 		}
 		sources[source.Path] = source
@@ -139,9 +92,20 @@ func (s *Store) Sources() (map[string]collect.Source, error) {
 	return sources, rows.Err()
 }
 
-// Save stores parsed events and marks their sources as parsed in one
-// transaction. It returns how many events were added or changed.
-func (s *Store) Save(events []event.Event, sources []collect.Source) (int64, error) {
+// Parsed is what parsing a source yielded. Replace is set when the source is
+// read by a new parser: events it no longer yields are removed, but only in
+// the sessions it still holds, since agents delete old sessions from shared
+// databases. Otherwise events are only added and updated, so requests an
+// agent removes from its logs stay.
+type Parsed struct {
+	Source  collect.Source
+	Events  []event.Event
+	Replace bool
+}
+
+// Save stores the events of parsed sources and marks the sources as parsed in
+// one transaction. It returns how many events were added, changed or removed.
+func (s *Store) Save(parsed []Parsed) (int64, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return 0, err
@@ -152,26 +116,71 @@ func (s *Store) Save(events []event.Event, sources []collect.Source) (int64, err
 		return 0, err
 	}
 	defer upsertEvent.Close()
-	var saved int64
-	for i := range events {
-		result, err := upsertEvent.Exec(eventFields(&events[i])...)
-		if err != nil {
-			return 0, err
-		}
-		affected, _ := result.RowsAffected()
-		saved += affected
-	}
-	upsertSource, err := tx.Prepare("INSERT OR REPLACE INTO sources (path, agent, size, mtime) VALUES (?, ?, ?, ?)")
+	upsertSource, err := tx.Prepare("INSERT OR REPLACE INTO sources (path, agent, size, mtime, parser) VALUES (?, ?, ?, ?, ?)")
 	if err != nil {
 		return 0, err
 	}
 	defer upsertSource.Close()
-	for _, source := range sources {
-		if _, err := upsertSource.Exec(source.Path, source.Agent, source.Size, source.MTime); err != nil {
+	var saved int64
+	for _, p := range parsed {
+		if p.Replace {
+			removed, err := removeStale(tx, p)
+			if err != nil {
+				return 0, err
+			}
+			saved += removed
+		}
+		for i := range p.Events {
+			result, err := upsertEvent.Exec(eventFields(&p.Events[i])...)
+			if err != nil {
+				return 0, err
+			}
+			affected, _ := result.RowsAffected()
+			saved += affected
+		}
+		source := p.Source
+		if _, err := upsertSource.Exec(source.Path, source.Agent, source.Size, source.MTime, source.Parser); err != nil {
 			return 0, err
 		}
 	}
 	return saved, tx.Commit()
+}
+
+// removeStale deletes the events of a source that it no longer yields, in the
+// sessions it yields events of.
+func removeStale(tx *sql.Tx, p Parsed) (int64, error) {
+	type key struct{ agent, id string }
+	yielded := make(map[key]bool, len(p.Events))
+	sessions := map[string]bool{}
+	for _, e := range p.Events {
+		yielded[key{e.Agent, e.ID}] = true
+		sessions[e.Session] = true
+	}
+	rows, err := tx.Query("SELECT agent, id, session FROM events WHERE source = ?", p.Source.Path)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	var stale []key
+	for rows.Next() {
+		var k key
+		var session string
+		if err := rows.Scan(&k.agent, &k.id, &session); err != nil {
+			return 0, err
+		}
+		if sessions[session] && !yielded[k] {
+			stale = append(stale, k)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	for _, k := range stale {
+		if _, err := tx.Exec("DELETE FROM events WHERE agent = ? AND id = ?", k.agent, k.id); err != nil {
+			return 0, err
+		}
+	}
+	return int64(len(stale)), nil
 }
 
 // Events returns every event, newest first. Seq is the row ID, which an

@@ -15,19 +15,23 @@ import (
 
 // Source is what a collector parses at once: a log file, a database, or a
 // directory whose files only make sense together. Size and modification time
-// detect changes.
+// detect changes, and Parser is the version of the collector that parsed it.
 type Source struct {
-	Agent string
-	Path  string
-	Size  int64
-	MTime int64
+	Agent  string
+	Path   string
+	Size   int64
+	MTime  int64
+	Parser int
 }
 
 // Collector finds one agent's sources and parses them into events.
 type Collector struct {
 	Agent string
-	List  func() ([]Source, error)
-	Parse func(path string) ([]event.Event, error)
+	// Version goes up whenever Parse yields different events from the same
+	// source, so that sources parsed before are parsed again.
+	Version int
+	List    func() ([]Source, error)
+	Parse   func(path string) ([]event.Event, error)
 }
 
 // All returns a collector for every supported agent.

@@ -50,7 +50,6 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:8790", "listen address; a free port is used when it is taken")
 	dataDir := flag.String("data", defaultDataDir(), "directory for collected events, custom prices and the models.dev cache")
 	noOpen := flag.Bool("no-open", false, "do not open the browser")
-	rebuild := flag.Bool("rebuild", false, "discard collected events and parse every source again; custom prices are kept")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
 	if *showVersion {
@@ -66,11 +65,6 @@ func main() {
 		log.Fatal(err)
 	}
 	defer events.Close()
-	if *rebuild {
-		if err := events.Reset(); err != nil {
-			log.Fatal(err)
-		}
-	}
 	custom, err := events.CustomPrices()
 	if err != nil {
 		log.Fatal(err)

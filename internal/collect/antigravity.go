@@ -30,9 +30,10 @@ func antigravity() Collector {
 		}
 	}
 	return Collector{
-		Agent: "antigravity",
-		List:  func() ([]Source, error) { return globDatabases("antigravity", patterns...) },
-		Parse: parseAntigravity,
+		Agent:   "antigravity",
+		Version: 1,
+		List:    func() ([]Source, error) { return globDatabases("antigravity", patterns...) },
+		Parse:   parseAntigravity,
 	}
 }
 

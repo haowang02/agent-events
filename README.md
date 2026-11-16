@@ -29,7 +29,6 @@ agent-events
 | `-addr` | 监听地址，默认 `127.0.0.1:8790`；端口被占用时自动改用空闲端口 |
 | `-data` | 数据目录，默认 `~/.local/share/agent-events` |
 | `-no-open` | 不自动打开浏览器 |
-| `-rebuild` | 清空已采集的请求并重新读取全部日志，保留自定义价格 |
 | `-version` | 显示版本 |
 
 费用按 [models.dev](https://models.dev/) 的参考价计算，也可以在「模型价格」页为模型设置自定义价格。

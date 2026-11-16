@@ -14,9 +14,10 @@ import (
 func claude() Collector {
 	dirs := under(roots("CLAUDE_CONFIG_DIR", homeDir(".config", "claude"), homeDir(".claude")), "projects")
 	return Collector{
-		Agent: "claude",
-		List:  func() ([]Source, error) { return files("claude", dirs, withSuffix(".jsonl")) },
-		Parse: parseClaude,
+		Agent:   "claude",
+		Version: 1,
+		List:    func() ([]Source, error) { return files("claude", dirs, withSuffix(".jsonl")) },
+		Parse:   parseClaude,
 	}
 }
 

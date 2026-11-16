@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/haowang02/agent-events/internal/collect"
-	"github.com/haowang02/agent-events/internal/event"
+	"github.com/haowang02/agent-events/internal/store"
 )
 
 const watchInterval = 3 * time.Second
@@ -41,8 +41,9 @@ func (s *Server) Watch() {
 	}
 }
 
-// scan parses new and changed sources. It reports whether any event was
-// added or changed, which a source changing does not imply.
+// scan parses new and changed sources, and sources read by an older parser.
+// It reports whether any event was added, changed or removed, which a source
+// changing does not imply.
 func (s *Server) scan() (changed bool, err error) {
 	known, err := s.store.Sources()
 	if err != nil {
@@ -51,6 +52,7 @@ func (s *Server) scan() (changed bool, err error) {
 	type job struct {
 		collector collect.Collector
 		source    collect.Source
+		replace   bool
 	}
 	var jobs []job
 	var problems []string
@@ -61,18 +63,20 @@ func (s *Server) scan() (changed bool, err error) {
 			continue
 		}
 		for _, source := range sources {
-			if previous, ok := known[source.Path]; !ok || previous != source {
-				jobs = append(jobs, job{collector, source})
+			source.Parser = collector.Version
+			previous, ok := known[source.Path]
+			if ok && previous == source {
+				continue
 			}
+			jobs = append(jobs, job{collector, source, ok && previous.Parser != source.Parser})
 		}
 	}
 	// Large sources first keeps the workers busy until the end.
 	sort.Slice(jobs, func(i, j int) bool { return jobs[i].source.Size > jobs[j].source.Size })
 
 	type result struct {
-		source collect.Source
-		events []event.Event
-		err    error
+		store.Parsed
+		err error
 	}
 	queue := make(chan job)
 	results := make(chan result)
@@ -81,7 +85,7 @@ func (s *Server) scan() (changed bool, err error) {
 		workers.Go(func() {
 			for item := range queue {
 				events, err := item.collector.Parse(item.source.Path)
-				results <- result{item.source, events, err}
+				results <- result{store.Parsed{Source: item.source, Events: events, Replace: item.replace}, err}
 			}
 		})
 	}
@@ -94,26 +98,26 @@ func (s *Server) scan() (changed bool, err error) {
 		close(results)
 	}()
 
-	var events []event.Event
-	var sources []collect.Source
+	var batch []store.Parsed
+	var batchEvents int
 	var saveErr error
 	flush := func() {
-		if len(sources) > 0 && saveErr == nil {
+		if len(batch) > 0 && saveErr == nil {
 			var saved int64
-			saved, saveErr = s.store.Save(events, sources)
+			saved, saveErr = s.store.Save(batch)
 			changed = changed || saved > 0
 		}
-		events, sources = nil, nil
+		batch, batchEvents = nil, 0
 	}
 	for item := range results {
 		if item.err != nil {
 			// Its signature is not stored, so the source is retried on the next scan.
-			problems = append(problems, item.source.Path+": "+item.err.Error())
+			problems = append(problems, item.Source.Path+": "+item.err.Error())
 			continue
 		}
-		events = append(events, item.events...)
-		sources = append(sources, item.source)
-		if len(events) >= 20000 || len(sources) >= 200 {
+		batch = append(batch, item.Parsed)
+		batchEvents += len(item.Events)
+		if batchEvents >= 20000 || len(batch) >= 200 {
 			flush()
 		}
 	}
