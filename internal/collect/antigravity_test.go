@@ -99,13 +99,25 @@ func TestParseAntigravity(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	failedUsage := pbVarintField(antigravityUsageModel, 1)
+	failedMeta := pbBytesField(antigravityStepCreated, pbVarintField(1, 1794736910))
+	if _, err := db.Exec(`INSERT INTO steps (idx, step_type, metadata) VALUES (?, ?, ?)`, 10, antigravityStepTypeError, failedMeta); err != nil {
+		t.Fatal(err)
+	}
+	failedRequest := pbBytesField(antigravityGenUsage, failedUsage)
+	failedRequest = append(failedRequest, pbBytesField(antigravityGenAttempts, pbStringField(antigravityAttemptError, "API error"))...)
+	label := append(pbStringField(1, "last_step_index"), pbStringField(2, "9")...)
+	failedRequest = append(failedRequest, pbBytesField(antigravityGenLabels, label)...)
+	if _, err := db.Exec(`INSERT INTO gen_metadata (idx, data) VALUES (?, ?)`, len(cases), pbBytesField(antigravityGenRequest, failedRequest)); err != nil {
+		t.Fatal(err)
+	}
 
 	events, err := parseAntigravity(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != len(cases) {
-		t.Fatalf("got %d events, want %d", len(events), len(cases))
+	if len(events) != len(cases)+1 {
+		t.Fatalf("got %d events, want %d", len(events), len(cases)+1)
 	}
 	for i, tc := range cases {
 		if events[i].Effort != tc.wantEffort {
@@ -114,5 +126,8 @@ func TestParseAntigravity(t *testing.T) {
 		if events[i].TTFTMS != tc.wantTTFT || events[i].LatencyMS != tc.wantLatency {
 			t.Errorf("event %d: got TTFT=%d latency=%d, want %d and %d", i, events[i].TTFTMS, events[i].LatencyMS, tc.wantTTFT, tc.wantLatency)
 		}
+	}
+	if failed := events[len(cases)]; !failed.Failed || failed.Error != "API error" || failed.Time != 1794736910000 || failed.Model != "gemini-4-hydrogen" {
+		t.Errorf("failed request: %+v", failed)
 	}
 }

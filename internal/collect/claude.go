@@ -61,8 +61,7 @@ type claudeMessage struct {
 		} `json:"output_tokens_details"`
 		ServiceTier string `json:"service_tier"`
 		Speed       string `json:"speed"`
-		// Advisor calls made while generating the response, billed under
-		// their own model on top of the top-level usage.
+		// Advisor and fallback attempts carry their own model and usage.
 		Iterations []struct {
 			Type  string `json:"type"`
 			Model string `json:"model"`
@@ -101,10 +100,10 @@ type claudeAPIRequest struct {
 }
 
 type claudeResponse struct {
-	event    event.Event
-	ref      string
-	end      int64
-	advisors []event.Event
+	event      event.Event
+	ref        string
+	end        int64
+	iterations []event.Event
 }
 
 const claudeSyntheticModel = "<synthetic>"
@@ -177,25 +176,44 @@ func parseClaude(path string) ([]event.Event, error) {
 		e := &response.event
 		response.ref = cmp.Or(line.RequestRef, response.ref)
 		response.end = max(response.end, at)
-		// Early blocks may carry partial output counts; keep the largest.
-		if usage := message.Usage; usage.OutputTokens >= e.OutputTokens {
+		usage := message.Usage
+		fallback := false
+		fallbackModel := ""
+		for _, iteration := range usage.Iterations {
+			if iteration.Type == "fallback_message" {
+				fallback = true
+				fallbackModel = cmp.Or(iteration.Model, fallbackModel)
+			}
+		}
+		// A fallback's final usage belongs to a different model and can be smaller.
+		if usage.OutputTokens >= e.OutputTokens || fallback {
+			if fallback {
+				e.Model = cmp.Or(fallbackModel, message.Model, e.Model)
+			}
 			usage.apply(e)
 			e.ReasoningTokens = 0
 			if usage.OutputTokensDetails != nil {
 				e.ReasoningTokens = usage.OutputTokensDetails.ThinkingTokens
 			}
 			e.Tier = claudeTier(usage.ServiceTier, usage.Speed)
-			response.advisors = response.advisors[:0]
+			response.iterations = response.iterations[:0]
 			for i, iteration := range usage.Iterations {
-				if iteration.Type != "advisor_message" || iteration.Model == "" {
+				kind := ""
+				switch {
+				case iteration.Type == "advisor_message":
+					kind = "advisor"
+				case fallback && iteration.Type == "message" && iteration.Model != "" && iteration.OutputTokens > 0:
+					kind = "fallback"
+				}
+				if kind == "" || iteration.Model == "" {
 					continue
 				}
-				advisor := event.Event{
-					Agent: "claude", ID: key + ":advisor:" + strconv.Itoa(i), Model: iteration.Model, Session: e.Session,
-					Project: e.Project, Client: e.Client, Kind: "advisor", Version: e.Version, Source: path,
+				extra := event.Event{
+					Agent: "claude", ID: key + ":" + kind + ":" + strconv.Itoa(i), Model: iteration.Model, Session: e.Session,
+					Project: e.Project, Client: e.Client, Kind: kind, Version: e.Version, Source: path,
 				}
-				iteration.apply(&advisor)
-				response.advisors = append(response.advisors, advisor)
+				iteration.apply(&extra)
+				response.iterations = append(response.iterations, extra)
 			}
 		}
 		e.Stop = cmp.Or(message.StopReason, e.Stop)
@@ -221,9 +239,9 @@ func parseClaude(path string) ([]event.Event, error) {
 			e.Model = cmp.Or(e.Model, request.model)
 		}
 		events = append(events, *e)
-		for _, advisor := range response.advisors {
-			advisor.Time = e.Time
-			events = append(events, advisor)
+		for _, iteration := range response.iterations {
+			iteration.Time = e.Time
+			events = append(events, iteration)
 		}
 	}
 	return events, nil

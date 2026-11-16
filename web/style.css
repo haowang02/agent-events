@@ -135,12 +135,7 @@ h3 { margin: 0; }
 /* Top bar */
 
 .topbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; flex: none; min-height: 56px; margin-bottom: 14px; padding: 8px 10px; }
-.nav-start { display: flex; align-items: center; gap: 14px; min-width: 0; }
-.brand { display: inline-flex; align-items: center; gap: 9px; padding: 0 4px 0 6px; font-weight: 650; font-size: 15px; letter-spacing: -0.01em; white-space: nowrap; }
-.brand svg { width: 26px; height: 26px; }
-.brand rect { fill: var(--primary); }
-.brand path { fill: none; stroke: var(--primary-contrast); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-.tabs { display: flex; gap: 2px; padding-left: 14px; border-left: 1px solid var(--border); }
+.tabs { display: flex; gap: 2px; }
 .tabs > button { padding: 7px 16px; border: 0; border-radius: 10px; background: transparent; color: var(--text-secondary); font-size: 14.5px; font-weight: 500; cursor: pointer; white-space: nowrap; }
 .tabs > button:hover { background: var(--surface-hover); color: var(--text-primary); }
 .tabs > button.active { background: var(--primary-soft); color: var(--primary); font-weight: 600; }
@@ -319,7 +314,8 @@ input[type="search"]::-webkit-search-cancel-button:hover { background: var(--tex
 .range-button { max-width: 360px; }
 .range-button > span { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .range-button > svg:first-child { width: 16px; height: 16px; color: var(--text-secondary); }
-.range-panel:popover-open { display: grid; grid-template-columns: max-content 588px; }
+.range-panel { grid-template-columns: max-content 588px; }
+.range-panel:popover-open { display: grid; }
 .range-shortcuts { display: flex; flex-direction: column; gap: 2px; padding: 18px 10px; border-right: 1px solid var(--border); background: var(--surface-muted); }
 .range-section-label { font-size: 12px; color: var(--text-secondary); }
 .range-shortcuts > .range-section-label { padding: 0 10px 8px; }
@@ -740,6 +736,6 @@ button.legend-item:hover { background: var(--surface-hover); color: var(--text-p
 
 /* Narrower desktop windows: the range editor stacks its calendars. */
 @media (max-width: 860px) {
-  .range-panel:popover-open { grid-template-columns: max-content minmax(0, 1fr); width: calc(100vw - 24px); }
+  .range-panel { grid-template-columns: max-content minmax(0, 1fr); width: calc(100vw - 24px); }
   .range-calendars, .range-inputs { grid-template-columns: 1fr; gap: 12px; }
 }

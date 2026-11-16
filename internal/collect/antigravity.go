@@ -44,9 +44,11 @@ const (
 	antigravityGenUsage         = 4  // request: ModelUsageStats
 	antigravityGenTTFT          = 11 // request: time to first response, google.protobuf.Duration
 	antigravityGenStreaming     = 12 // request: time from first response to completion, google.protobuf.Duration
+	antigravityGenAttempts      = 17 // request: generation attempts
 	antigravityGenModel         = 19 // request: model name
 	antigravityGenLabels        = 20 // request: repeated {1: key, 2: value}
 	antigravityGenDisplayName   = 21 // request: display name, e.g. "Gemini 4 Hydrogen (Medium)"
+	antigravityAttemptError     = 3  // attempt: error message
 	antigravityUsageModel       = 1  // usage: model enum
 	antigravityUsageInput       = 2  // usage: uncached input
 	antigravityUsageOutput      = 3  // usage: thinking + response output
@@ -59,6 +61,7 @@ const (
 	antigravityStepModel        = 11 // step metadata: model enum
 	antigravityStepErrorMessage = 2  // error_details: message
 	antigravityStepTypeResponse = 15 // steps.step_type of a model response
+	antigravityStepTypeError    = 17 // steps.step_type of an error message
 	antigravityWorkspace        = 1  // trajectory metadata: {1: workspace URI}
 )
 
@@ -113,6 +116,7 @@ func pbMillis(message []byte) int64 {
 }
 
 type antigravityStep struct {
+	kind    int64
 	created int64
 	usage   []byte
 	model   int64
@@ -148,10 +152,9 @@ func normalizeAntigravityEffort(raw string) string {
 	}
 }
 
-// antigravitySteps returns model response steps by index, and their indexes
-// by the message ID of their usage.
+// antigravitySteps indexes response and error steps, and matches responses by message ID.
 func antigravitySteps(db *sql.DB) (map[int64]antigravityStep, map[string]int64, error) {
-	rows, err := db.Query("SELECT idx, metadata, error_details FROM steps WHERE step_type = ?", antigravityStepTypeResponse)
+	rows, err := db.Query("SELECT idx, step_type, metadata, error_details FROM steps WHERE step_type IN (?, ?)", antigravityStepTypeResponse, antigravityStepTypeError)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -160,17 +163,19 @@ func antigravitySteps(db *sql.DB) (map[int64]antigravityStep, map[string]int64, 
 	err = scanRows(rows, func() error {
 		var index int64
 		var metadata, details []byte
-		if err := rows.Scan(&index, &metadata, &details); err != nil {
+		var kind int64
+		if err := rows.Scan(&index, &kind, &metadata, &details); err != nil {
 			return err
 		}
 		step := antigravityStep{
+			kind:    kind,
 			created: pbMillis(pbBytes(metadata, antigravityStepCreated)),
 			usage:   pbBytes(metadata, antigravityStepUsage),
 			model:   pbVarint(metadata, antigravityStepModel),
 			error:   string(pbBytes(details, antigravityStepErrorMessage)),
 		}
 		steps[index] = step
-		if id := string(pbBytes(step.usage, antigravityUsageMessageID)); id != "" {
+		if id := string(pbBytes(step.usage, antigravityUsageMessageID)); kind == antigravityStepTypeResponse && id != "" {
 			byMessage[id] = index
 		}
 		return nil
@@ -178,8 +183,7 @@ func antigravitySteps(db *sql.DB) (map[int64]antigravityStep, map[string]int64, 
 	return steps, byMessage, err
 }
 
-// parseAntigravity reads gen_metadata, one row per model request, and dates
-// each request by its response step. Failed responses have no row there.
+// parseAntigravity reads gen_metadata and dates requests by their response or error step.
 func parseAntigravity(path string) ([]event.Event, error) {
 	db, err := openDatabase(path)
 	if err != nil {
@@ -231,7 +235,11 @@ func parseAntigravity(path string) ([]event.Event, error) {
 		model := string(pbBytes(request, antigravityGenModel))
 		displayName := string(pbBytes(request, antigravityGenDisplayName))
 		m := antigravityModel{name: model, effort: antigravityEffort(displayName, model)}
-		models[pbVarint(usage, antigravityUsageModel)] = m
+		modelID := pbVarint(usage, antigravityUsageModel)
+		if modelID != 0 {
+			m.name = cmp.Or(m.name, models[modelID].name)
+			models[modelID] = m
+		}
 		stepIndex, ok := stepsByMessage[string(pbBytes(usage, antigravityUsageMessageID))]
 		if !ok {
 			// The response step follows the last step the request was built from.
@@ -242,6 +250,10 @@ func parseAntigravity(path string) ([]event.Event, error) {
 		if !ok || !found {
 			return nil
 		}
+		failure := string(pbBytes(pbBytes(request, antigravityGenAttempts), antigravityAttemptError))
+		if step.kind == antigravityStepTypeError && failure == "" {
+			return nil
+		}
 		responded[stepIndex] = true
 		e := newEvent(cmp.Or(labels["request_id"], conversation+":"+strconv.FormatInt(index, 10)), m, usage)
 		e.Time = step.created
@@ -250,6 +262,9 @@ func parseAntigravity(path string) ([]event.Event, error) {
 		if first != nil && streaming != nil {
 			e.LatencyMS = e.TTFTMS + pbMillis(streaming)
 		}
+		if step.kind == antigravityStepTypeError {
+			e.Failed, e.Error = true, failure
+		}
 		events = append(events, e)
 		return nil
 	})
@@ -257,7 +272,7 @@ func parseAntigravity(path string) ([]event.Event, error) {
 		return nil, err
 	}
 	for index, step := range steps {
-		if responded[index] || step.error == "" {
+		if step.kind != antigravityStepTypeResponse || responded[index] || step.error == "" {
 			continue
 		}
 		e := newEvent(conversation+":step:"+strconv.FormatInt(index, 10), models[step.model], step.usage)

@@ -15,8 +15,8 @@ agent-events 只读取各 Agent 写在本机的日志和数据库，不修改它
 | Agent | 默认位置 | 环境变量 | 一条记录 | 延迟 |
 | --- | --- | --- | --- | --- |
 | Claude Code | `~/.claude/projects`、`~/.config/claude/projects` 下的 `*.jsonl` | `CLAUDE_CONFIG_DIR` | 一次请求 | 从 `api-request` 记录到最后一个内容块 |
-| Codex | `~/.codex/sessions`、`~/.codex/archived_sessions` 下的 `rollout-*.jsonl` 及其 `.zst` 压缩版本 | `CODEX_HOME` | 一次请求 | 从用户消息或上一次工具调用完成到本次响应；每轮第一个请求有首字时间 |
-| OpenCode | `~/.local/share/opencode` 下的 `opencode.db`、`opencode-*.db` 和 `storage/message/**/*.json` | `OPENCODE_DATA_DIR`、`XDG_DATA_HOME` | 一次请求 | 从请求开始到响应结束，工具执行时间不计入 |
+| Codex | `~/.codex/sessions`、`~/.codex/archived_sessions` 下的 `rollout-*.jsonl` 及其 `.zst` 压缩版本 | `CODEX_HOME` | 一次请求 | 根据用户消息或上一次工具调用完成到本次响应估算；每轮第一个请求可能有首字时间 |
+| OpenCode | `~/.local/share/opencode` 下的 `opencode.db`、`opencode-*.db` 和 `storage/message/**/*.json` | `OPENCODE_DATA_DIR`、`XDG_DATA_HOME` | 一次请求 | 从请求开始到响应结束；缺少响应结束时间时使用步骤结束时间，可能包含工具执行 |
 | Kilo Code | `~/.local/share/kilo/kilo.db` | `KILO_DATA_DIR` | 一次请求 | 同 OpenCode |
 | Antigravity | `~/.gemini/antigravity`、`antigravity-cli`、`antigravity-ide`、`antigravity-backup`、`antigravity-acp` 和 `~/.config/antigravity` 下的 `conversations/*.db` | `ANTIGRAVITY_DATA_DIR` | 一次请求 | 首字耗时加后续生成耗时；任一阶段缺失时总耗时未知 |
 | Gemini CLI | `~/.gemini/tmp/*/chats/` 下的 `*.json`、`*.jsonl` | `GEMINI_DATA_DIR` | 一次请求 | — |
@@ -45,6 +45,7 @@ Codex 的会话类型优先保留 `subagent` 等线程角色，再根据客户�
 - Gemini CLI 和 Qwen Code 的输入通常包含缓存读取，按总数是否吻合判断后再拆分。
 - 推理 Token 单独记录的（OpenCode、Droid、Hermes 等）计入输出。
 - Claude Code 的缓存写入区分 5 分钟和 1 小时两种有效期，分别计价。
+- Claude Code 服务端回退时，额外记录有输出的前序模型用量；无输出的拒绝是否计费取决于拒绝类别，无法从每次尝试的用量中确定。
 
 TPS = 输出 Token / 总延迟。
 
