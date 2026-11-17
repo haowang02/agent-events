@@ -17,32 +17,36 @@ func amp() Collector {
 		return strings.HasPrefix(name, "T-") && strings.HasSuffix(name, ".json")
 	}
 	return Collector{
-		Agent: "amp",
-		List:  func() ([]Source, error) { return files("amp", dirs, isThread) },
-		Parse: parseAmp,
+		Agent:   "amp",
+		Version: 2,
+		List:    func() ([]Source, error) { return files("amp", dirs, isThread) },
+		Parse:   parseAmp,
 	}
 }
 
 // parseAmp reads an Amp thread. Older threads keep a usage ledger whose
 // events take their cache counts from the message they produced; current
 // ones record usage on each assistant message.
-func parseAmp(path string) ([]event.Event, error) {
+func parseAmp(path string) (Result, error) {
 	var thread struct {
-		ID       string           `json:"id"`
-		Messages []map[string]any `json:"messages"`
+		ID       string `json:"id"`
+		Messages []any  `json:"messages"`
 		Ledger   *struct {
-			Events []map[string]any `json:"events"`
+			Events []any `json:"events"`
 		} `json:"usageLedger"`
 	}
-	if err := readJSON(path, &thread); err != nil || thread.ID == "" {
-		return nil, nil
+	if err := readJSON(path, &thread); err != nil {
+		return Result{}, err
+	}
+	if thread.ID == "" {
+		return Result{}, nil
 	}
 	newEvent := func(id string, at int64, model string) event.Event {
 		return event.Event{Agent: "amp", ID: thread.ID + ":" + id, Time: at, Model: model, Session: thread.ID, Source: path}
 	}
 	messageID := func(value any) string {
-		if id := number(value); id > 0 {
-			return strconv.FormatInt(id, 10)
+		if id, ok := value.(float64); ok && float64(int64(id)) == id {
+			return strconv.FormatInt(int64(id), 10)
 		}
 		return text(value)
 	}
@@ -50,12 +54,16 @@ func parseAmp(path string) ([]event.Event, error) {
 	if thread.Ledger != nil && thread.Ledger.Events != nil {
 		type cache struct{ read, write int64 }
 		caches := map[string]cache{}
-		for _, message := range thread.Messages {
+		for _, value := range thread.Messages {
+			message := object(value)
 			if usage := object(message["usage"]); text(message["role"]) == "assistant" && usage != nil {
-				caches[messageID(message["messageId"])] = cache{number(usage["cacheReadInputTokens"]), number(usage["cacheCreationInputTokens"])}
+				if id := messageID(message["messageId"]); id != "" {
+					caches[id] = cache{number(usage["cacheReadInputTokens"]), number(usage["cacheCreationInputTokens"])}
+				}
 			}
 		}
-		for i, ledger := range thread.Ledger.Events {
+		for i, value := range thread.Ledger.Events {
+			ledger := object(value)
 			tokens := object(ledger["tokens"])
 			model := text(ledger["model"])
 			if tokens == nil || model == "" {
@@ -70,9 +78,10 @@ func parseAmp(path string) ([]event.Event, error) {
 				events = append(events, e)
 			}
 		}
-		return events, nil
+		return Result{Events: events}, nil
 	}
-	for i, message := range thread.Messages {
+	for i, value := range thread.Messages {
+		message := object(value)
 		usage := object(message["usage"])
 		if text(message["role"]) != "assistant" || usage == nil {
 			continue
@@ -90,5 +99,5 @@ func parseAmp(path string) ([]event.Event, error) {
 			events = append(events, e)
 		}
 	}
-	return events, nil
+	return Result{Events: events}, nil
 }

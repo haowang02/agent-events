@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -15,7 +16,7 @@ func claude() Collector {
 	dirs := under(roots("CLAUDE_CONFIG_DIR", homeDir(".config", "claude"), homeDir(".claude")), "projects")
 	return Collector{
 		Agent:   "claude",
-		Version: 1,
+		Version: 4,
 		List:    func() ([]Source, error) { return files("claude", dirs, withSuffix(".jsonl")) },
 		Parse:   parseClaude,
 	}
@@ -110,15 +111,15 @@ type claudeResponse struct {
 const claudeSyntheticModel = "<synthetic>"
 
 var (
-	claudeAssistantType  = []byte(`"type":"assistant"`)
-	claudeAPIRequestType = []byte(`"type":"api-request"`)
+	claudeAssistantType  = []byte(`"assistant"`)
+	claudeAPIRequestType = []byte(`"api-request"`)
 )
 
 // parseClaude reads a Claude Code transcript. Each content block of a response
 // is its own line sharing the message ID, request ID and usage, so lines are
 // merged per response. Responses that reference an api-request line are timed
 // from that request to their last content block.
-func parseClaude(path string) ([]event.Event, error) {
+func parseClaude(path string) (Result, error) {
 	requests := map[string]claudeAPIRequest{}
 	responses := map[string]*claudeResponse{}
 	var order []string
@@ -154,12 +155,30 @@ func parseClaude(path string) ([]event.Event, error) {
 		if message.Model == claudeSyntheticModel && !line.IsAPIErrorMessage {
 			return // A local placeholder, not a model request.
 		}
+		if line.SessionID == "" {
+			line.SessionID = strings.TrimSuffix(filepath.Base(path), ".jsonl")
+			parts := strings.Split(filepath.ToSlash(path), "/")
+			for i, part := range parts {
+				if part == "subagents" && i > 0 {
+					line.SessionID = parts[i-1]
+					line.IsSidechain = true
+					break
+				}
+			}
+		}
 		// Anthropic message IDs are unique per response, so a response copied
 		// into another transcript, or replayed by a /btw side question under a
 		// new request ID, keeps one key. Gateways may reuse their own IDs.
 		key := message.ID
-		if !strings.HasPrefix(key, "msg_") {
-			key += ":" + line.RequestID
+		if !strings.HasPrefix(key, "msg_") && !strings.HasPrefix(key, "resp_") {
+			if ref := cmp.Or(line.RequestID, line.RequestRef); ref != "" {
+				key += ":" + ref
+			} else {
+				key += ":" + line.SessionID + ":" + cmp.Or(line.Timestamp, "line:"+strconv.Itoa(len(order)))
+			}
+		}
+		if message.ID == "" {
+			key = line.SessionID + ":" + cmp.Or(line.RequestID, line.RequestRef, line.Timestamp+":"+strconv.Itoa(len(order)))
 		}
 		at := parseTime(line.Timestamp)
 		response := responses[key]
@@ -191,13 +210,24 @@ func parseClaude(path string) ([]event.Event, error) {
 			if fallback {
 				e.Model = cmp.Or(fallbackModel, message.Model, e.Model)
 			}
+			before := *e
 			usage.apply(e)
-			e.ReasoningTokens = 0
+			if fallback {
+				e.ReasoningTokens = 0
+			}
+			if !fallback {
+				e.InputTokens = max(e.InputTokens, before.InputTokens)
+				e.CacheReadTokens = max(e.CacheReadTokens, before.CacheReadTokens)
+				e.CacheWriteTokens = max(e.CacheWriteTokens, before.CacheWriteTokens)
+				e.CacheWrite1hTokens = max(e.CacheWrite1hTokens, before.CacheWrite1hTokens)
+			}
 			if usage.OutputTokensDetails != nil {
 				e.ReasoningTokens = usage.OutputTokensDetails.ThinkingTokens
 			}
-			e.Tier = claudeTier(usage.ServiceTier, usage.Speed)
-			response.iterations = response.iterations[:0]
+			e.Tier = cmp.Or(claudeTier(usage.ServiceTier, usage.Speed), e.Tier)
+			if len(usage.Iterations) > 0 {
+				response.iterations = response.iterations[:0]
+			}
 			for i, iteration := range usage.Iterations {
 				kind := ""
 				switch {
@@ -227,7 +257,7 @@ func parseClaude(path string) ([]event.Event, error) {
 		}
 	})
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	var events []event.Event
 	for _, key := range order {
@@ -245,7 +275,7 @@ func parseClaude(path string) ([]event.Event, error) {
 			events = append(events, iteration)
 		}
 	}
-	return events, nil
+	return Result{Events: events}, nil
 }
 
 func claudeTier(serviceTier, speed string) string {

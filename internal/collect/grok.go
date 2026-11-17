@@ -14,9 +14,10 @@ import (
 func grok() Collector {
 	dirs := under(roots("GROK_HOME", homeDir(".grok")), "sessions")
 	return Collector{
-		Agent: "grok",
-		List:  func() ([]Source, error) { return files("grok", dirs, named("updates.jsonl")) },
-		Parse: parseGrok,
+		Agent:   "grok",
+		Version: 1,
+		List:    func() ([]Source, error) { return files("grok", dirs, named("updates.jsonl")) },
+		Parse:   parseGrok,
 	}
 }
 
@@ -36,7 +37,7 @@ func grokModel(model string) string {
 
 // parseGrok reads sessions/<encoded cwd>/<session>/updates.jsonl. Only
 // completed turns record usage, totalled per model over the turn's requests.
-func parseGrok(path string) ([]event.Event, error) {
+func parseGrok(path string) (Result, error) {
 	session := filepath.Base(filepath.Dir(path))
 	project := filepath.Base(filepath.Dir(filepath.Dir(path)))
 	if decoded, err := url.PathUnescape(project); err == nil {
@@ -94,10 +95,10 @@ func parseGrok(path string) ([]event.Event, error) {
 			}
 			e.ID = line.Params.Meta.EventID + "|" + name
 			if line.Params.Meta.EventID == "" {
-				e.ID = fmt.Sprintf("%s|%d|%s|%d|%d", turnSession, at, name, e.InputTokens, e.OutputTokens)
+				e.ID = fmt.Sprintf("%s|%d|%s|%d|%d|%d|%d|%d", turnSession, at, name, e.InputTokens, e.OutputTokens, e.CacheReadTokens, e.CacheWriteTokens, e.ReasoningTokens)
 			}
 			events = append(events, e)
 		}
 	})
-	return events, err
+	return Result{Events: events}, err
 }

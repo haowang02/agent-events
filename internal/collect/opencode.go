@@ -24,7 +24,8 @@ func kilo() Collector {
 // the per-message JSON files that versions before SQLite wrote.
 func openCodeFamily(agent string, dirs []string, databaseNames ...string) Collector {
 	return Collector{
-		Agent: agent,
+		Agent:   agent,
+		Version: 3,
 		List: func() ([]Source, error) {
 			var patterns []string
 			for _, dir := range dirs {
@@ -39,7 +40,7 @@ func openCodeFamily(agent string, dirs []string, databaseNames ...string) Collec
 			messages, err := files(agent, under(dirs, "storage", "message"), withSuffix(".json"))
 			return append(sources, messages...), err
 		},
-		Parse: func(path string) ([]event.Event, error) {
+		Parse: func(path string) (Result, error) {
 			if strings.HasSuffix(path, ".json") {
 				return parseOpenCodeMessageFile(agent, path)
 			}
@@ -52,15 +53,16 @@ func openCodeFamily(agent string, dirs []string, databaseNames ...string) Collec
 // modelID and providerID, and V2 assistant and compaction messages with a
 // model reference.
 type openCodeMessage struct {
-	ID         string `json:"id"`
-	SessionID  string `json:"sessionID"`
-	Type       string `json:"-"` // The V2 session_message type.
-	Role       string `json:"role"`
-	Agent      string `json:"agent"`
-	Mode       string `json:"mode"`
-	ModelID    string `json:"modelID"`
-	ProviderID string `json:"providerID"`
-	Variant    string `json:"variant"`
+	ID         string            `json:"id"`
+	SessionID  string            `json:"sessionID"`
+	Type       string            `json:"-"` // The V2 session_message type.
+	Role       string            `json:"role"`
+	Agent      string            `json:"agent"`
+	Mode       string            `json:"mode"`
+	ModelID    string            `json:"modelID"`
+	ProviderID string            `json:"providerID"`
+	Variant    string            `json:"variant"`
+	Content    []json.RawMessage `json:"content"`
 	Model      *struct {
 		ID         string `json:"id"`
 		ModelID    string `json:"modelID"`
@@ -80,6 +82,7 @@ type openCodeMessage struct {
 		Input     int64 `json:"input"`  // Excludes cached input.
 		Output    int64 `json:"output"` // Excludes reasoning.
 		Reasoning int64 `json:"reasoning"`
+		Total     int64 `json:"total"`
 		Cache     struct {
 			Read  int64 `json:"read"`
 			Write int64 `json:"write"`
@@ -122,6 +125,19 @@ func (m *openCodeMessage) event(agent, id string, session openCodeSession) (even
 	} else if session.parent != "" {
 		e.Kind = "subagent"
 	}
+	if e.Provider == "claude-agent" {
+		for _, raw := range m.Content {
+			var part struct {
+				Native struct {
+					Session string `json:"sessionID"`
+				} `json:"native"`
+			}
+			if json.Unmarshal(raw, &part) == nil && strings.TrimSpace(part.Native.Session) != "" {
+				e.NativeSession = strings.TrimSpace(part.Native.Session)
+				break
+			}
+		}
+	}
 	if end := int64(cmp.Or(m.Time.Streamed, m.Time.Completed)); end >= e.Time && e.Time > 0 {
 		e.LatencyMS = end - e.Time
 	}
@@ -131,6 +147,7 @@ func (m *openCodeMessage) event(agent, id string, session openCodeSession) (even
 		e.CacheWriteTokens = tokens.Cache.Write
 		e.OutputTokens = tokens.Output + tokens.Reasoning
 		e.ReasoningTokens = tokens.Reasoning
+		fillTotal(&e, tokens.Total)
 	}
 	if failure := m.Error; failure != nil {
 		e.Failed = true
@@ -145,20 +162,20 @@ func (m *openCodeMessage) event(agent, id string, session openCodeSession) (even
 
 // parseOpenCodeDatabase reads V1 messages from the message table and V2
 // messages from session_message; a database may hold both.
-func parseOpenCodeDatabase(agent, path string) ([]event.Event, error) {
+func parseOpenCodeDatabase(agent, path string) (Result, error) {
 	db, err := openDatabase(path)
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	defer db.Close()
 	sessions, err := openCodeSessions(db)
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	var events []event.Event
 	add := func(id, sessionID string, message *openCodeMessage, created int64) {
 		message.SessionID = sessionID
-		message.Time.Created = cmp.Or(message.Time.Created, timestamp(created))
+		message.Time.Created = cmp.Or(message.Time.Created, timestamp(unixMillis(float64(created))))
 		if e, ok := message.event(agent, id, sessions[sessionID]); ok {
 			e.Source = path
 			events = append(events, e)
@@ -167,12 +184,12 @@ func parseOpenCodeDatabase(agent, path string) ([]event.Event, error) {
 
 	v1, err := columns(db, "message")
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	if v1["id"] && v1["session_id"] && v1["data"] {
 		rows, err := db.Query("SELECT id, session_id, data, " + columnOr(v1, "time_created", "0") + " FROM message")
 		if err != nil {
-			return nil, err
+			return Result{}, err
 		}
 		err = scanRows(rows, func() error {
 			var id, session, data string
@@ -187,24 +204,24 @@ func parseOpenCodeDatabase(agent, path string) ([]event.Event, error) {
 			return nil
 		})
 		if err != nil {
-			return nil, err
+			return Result{}, err
 		}
 	}
 
 	v2, err := columns(db, "session_message")
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	if v2["id"] && v2["session_id"] && v2["type"] && v2["data"] {
 		copies, err := openCodeForkCopies(db, v2["seq"])
 		if err != nil {
-			return nil, err
+			return Result{}, err
 		}
 		rows, err := db.Query(fmt.Sprintf(
 			"SELECT id, session_id, type, data, %s, %s FROM session_message WHERE type IN ('assistant', 'compaction')",
 			columnOr(v2, "seq", "-1"), columnOr(v2, "time_created", "0")))
 		if err != nil {
-			return nil, err
+			return Result{}, err
 		}
 		err = scanRows(rows, func() error {
 			var id, session, kind, data string
@@ -222,10 +239,10 @@ func parseOpenCodeDatabase(agent, path string) ([]event.Event, error) {
 			return nil
 		})
 		if err != nil {
-			return nil, err
+			return Result{}, err
 		}
 	}
-	return events, nil
+	return Result{Events: events}, nil
 }
 
 // openCodeSessions reads session metadata from the V1 session table and the
@@ -292,7 +309,7 @@ func openCodeForkCopies(db *sql.DB, hasSeq bool) (map[string]int64, error) {
 			Type      string `json:"type"`
 			MessageID string `json:"messageID"`
 		}
-		if json.Unmarshal([]byte(f.boundary), &boundary) != nil {
+		if json.Unmarshal([]byte(f.boundary), &boundary) != nil || (boundary.Type != "before" && boundary.Type != "through") {
 			continue
 		}
 		var seq sql.NullInt64
@@ -313,10 +330,10 @@ func openCodeForkCopies(db *sql.DB, hasSeq bool) (map[string]int64, error) {
 
 // parseOpenCodeMessageFile reads storage/message/<session>/<message>.json and
 // the session's storage/session/<project>/<session>.json.
-func parseOpenCodeMessageFile(agent, path string) ([]event.Event, error) {
+func parseOpenCodeMessageFile(agent, path string) (Result, error) {
 	var message openCodeMessage
 	if err := readJSON(path, &message); err != nil || message.Role != "assistant" {
-		return nil, nil
+		return Result{}, nil
 	}
 	var session openCodeSession
 	storage := filepath.Dir(filepath.Dir(filepath.Dir(path)))
@@ -333,8 +350,8 @@ func parseOpenCodeMessageFile(agent, path string) ([]event.Event, error) {
 	id := cmp.Or(message.ID, strings.TrimSuffix(filepath.Base(path), ".json"))
 	e, ok := message.event(agent, id, session)
 	if !ok {
-		return nil, nil
+		return Result{}, nil
 	}
 	e.Source = path
-	return []event.Event{e}, nil
+	return Result{Events: []event.Event{e}}, nil
 }

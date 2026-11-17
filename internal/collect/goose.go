@@ -20,7 +20,7 @@ func goose() Collector {
 		paths = []string{filepath.Join(root, "data", "sessions", "sessions.db")}
 	}
 	return Collector{
-		Agent: "goose",
+		Agent: "goose", Version: 1,
 		List:  func() ([]Source, error) { return databases("goose", paths...) },
 		Parse: parseGoose,
 	}
@@ -28,24 +28,24 @@ func goose() Collector {
 
 // parseGoose reads the sessions table of Goose, which only keeps each
 // session's total usage. Accumulated counts include compacted history.
-func parseGoose(path string) ([]event.Event, error) {
+func parseGoose(path string) (Result, error) {
 	db, err := openDatabase(path)
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	defer db.Close()
 	names, err := columns(db, "sessions")
 	if err != nil || !names["model_config_json"] {
-		return nil, err
+		return Result{}, err
 	}
 	tokens := func(name string) string {
 		return fmt.Sprintf("COALESCE(NULLIF(%s, 0), %s)", columnOr(names, "accumulated_"+name, "0"), columnOr(names, name, "0"))
 	}
-	rows, err := db.Query(fmt.Sprintf("SELECT id, model_config_json, %s, %s, %s, %s, %s, %s FROM sessions WHERE model_config_json IS NOT NULL",
+	rows, err := db.Query(fmt.Sprintf("SELECT id, model_config_json, %s, %s, %s, %s, %s, %s FROM sessions WHERE id IS NOT NULL AND model_config_json IS NOT NULL",
 		columnOr(names, "provider_name", "''"), columnOr(names, "created_at", "NULL"), columnOr(names, "working_dir", "''"),
 		tokens("input_tokens"), tokens("output_tokens"), tokens("total_tokens")))
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	var events []event.Event
 	err = scanRows(rows, func() error {
@@ -72,5 +72,5 @@ func parseGoose(path string) ([]event.Event, error) {
 		}
 		return nil
 	})
-	return events, err
+	return Result{Events: events}, err
 }

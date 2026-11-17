@@ -29,21 +29,27 @@ func kimi() Collector {
 		return false
 	}
 	return Collector{
-		Agent: "kimi",
-		List:  func() ([]Source, error) { return files("kimi", dirs, accept) },
-		Parse: parseKimi,
+		Agent:   "kimi",
+		Version: 1,
+		List:    func() ([]Source, error) { return files("kimi", dirs, accept) },
+		Parse:   parseKimi,
 	}
 }
 
 // parseKimi reads a wire.jsonl. Kimi CLI reports each step's usage in
 // StatusUpdate messages and leaves the model to config.json; Kimi Code writes
 // usage.record lines that total a turn.
-func parseKimi(path string) ([]event.Event, error) {
+func parseKimi(path string) (Result, error) {
 	sessionDir, kind := filepath.Dir(path), ""
 	if filepath.Base(filepath.Dir(sessionDir)) == "agents" {
 		sessionDir, kind = filepath.Dir(filepath.Dir(sessionDir)), "subagent"
 	}
 	session := filepath.Base(sessionDir)
+	identity := session
+	if kind == "subagent" {
+		identity += ":agent:" + filepath.Base(filepath.Dir(path))
+	}
+	fallbackTime := fileTime(path)
 	var config struct {
 		Model string `json:"model"`
 	}
@@ -102,8 +108,9 @@ func parseKimi(path string) ([]event.Event, error) {
 		if e.TotalTokens() == 0 {
 			return
 		}
-		e.ID = session + ":" + cmp.Or(e.ID, strconv.FormatInt(e.Time, 10)+":"+strconv.Itoa(len(events)))
+		e.Time = cmp.Or(e.Time, fallbackTime)
+		e.ID = identity + ":" + cmp.Or(e.ID, strconv.FormatInt(e.Time, 10)+":"+strconv.Itoa(len(events)))
 		events = append(events, e)
 	})
-	return events, err
+	return Result{Events: events}, err
 }

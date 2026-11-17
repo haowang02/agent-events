@@ -3,6 +3,7 @@ package collect
 import (
 	"cmp"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -15,11 +16,11 @@ import (
 // copilot collects GitHub Copilot CLI from its OpenTelemetry exports, which
 // record each model call, and its session-state shutdown snapshots, which only
 // total usage per model. Both describe the same sessions, so the home is
-// parsed as one source and snapshots only count for sessions without calls.
+// parsed as one source and covered calls explicitly retire their older rows.
 func copilot() Collector {
 	root := cmp.Or(strings.TrimSpace(os.Getenv("COPILOT_HOME")), homeDir(".copilot"))
 	exporter := strings.TrimSpace(os.Getenv("COPILOT_OTEL_FILE_EXPORTER_PATH"))
-	paths := []string{root}
+	paths := []string{filepath.Join(root, "otel"), filepath.Join(root, "session-state")}
 	if exporter != "" {
 		paths = append(paths, exporter)
 	}
@@ -36,7 +37,7 @@ func copilot() Collector {
 			len(parts) == 3 && parts[0] == "session-state" && parts[2] == "events.jsonl"
 	}
 	return Collector{
-		Agent: "copilot",
+		Agent: "copilot", Version: 3,
 		List: func() ([]Source, error) {
 			source := Source{Agent: "copilot", Path: root}
 			err := walk(paths, accept, func(_ string, info fs.FileInfo) {
@@ -48,25 +49,31 @@ func copilot() Collector {
 			}
 			return []Source{source}, nil
 		},
-		Parse: func(string) ([]event.Event, error) {
-			var calls, snapshots []event.Event
+		Parse: func(string) (Result, error) {
+			var calls []copilotCall
+			var states []copilotState
+			var readErr error
 			err := walk(paths, accept, func(path string, _ fs.FileInfo) {
+				if readErr != nil {
+					return
+				}
 				if filepath.Base(path) == "events.jsonl" && path != exporter {
-					snapshots = append(snapshots, parseCopilotSessionState(path)...)
+					state, err := readCopilotState(path)
+					readErr = err
+					states = append(states, state)
 				} else {
-					calls = append(calls, parseCopilotOTel(path)...)
+					entries, err := readCopilotCalls(path)
+					readErr = err
+					calls = append(calls, entries...)
 				}
 			})
-			covered := map[string]bool{}
-			for _, e := range calls {
-				covered[e.Session] = true
+			if err != nil {
+				return Result{}, err
 			}
-			for _, e := range snapshots {
-				if !covered[e.Session] {
-					calls = append(calls, e)
-				}
+			if readErr != nil {
+				return Result{}, readErr
 			}
-			return calls, err
+			return reconcileCopilot(calls, states), nil
 		},
 	}
 }
@@ -156,19 +163,30 @@ func otelTime(raw json.RawMessage) int64 {
 
 type copilotCall struct {
 	event.Event
-	kind            int
-	trace, response string
+	kind                     int
+	trace, response, service string
+	accounting               string
 }
 
-// parseCopilotOTel reads an OpenTelemetry JSONL export.
-func parseCopilotOTel(path string) []event.Event {
+func copilotCallKey(call copilotCall) string {
+	if call.kind == copilotChatSpan && call.service == "" && call.response != "" {
+		return fmt.Sprintf("%s:%s:%d:%d:%d:%d:%d", call.response, call.Model, call.InputTokens, call.CacheReadTokens, call.CacheWriteTokens, call.OutputTokens, call.ReasoningTokens)
+	}
+	return call.ID
+}
+
+// readCopilotCalls reads the raw accounting records in one export.
+func readCopilotCalls(path string) ([]copilotCall, error) {
 	var records []copilotRecord
-	_ = readLines(path, func(raw []byte) {
+	err := readLines(path, func(raw []byte) {
 		var record copilotRecord
 		if json.Unmarshal(raw, &record) == nil && record.Attributes != nil {
 			records = append(records, record)
 		}
 	})
+	if err != nil {
+		return nil, err
+	}
 	traceModels, traceSessions := map[string]string{}, map[string]string{}
 	for i := range records {
 		r := &records[i]
@@ -186,7 +204,6 @@ func parseCopilotOTel(path string) []event.Event {
 	}
 
 	var calls []copilotCall
-	bestByTrace, bestByResponse := map[string]int{}, map[string]int{}
 	for i := range records {
 		r := &records[i]
 		kind, ok := r.kind()
@@ -199,13 +216,14 @@ func parseCopilotOTel(path string) []event.Event {
 		cacheWrite := max(firstNumber(a, "gen_ai.usage.cache_write.input_tokens"), firstNumber(a, "gen_ai.usage.cache_creation.input_tokens"))
 		reasoning := max(firstNumber(a, "gen_ai.usage.reasoning.output_tokens"), firstNumber(a, "gen_ai.usage.reasoning_tokens"))
 		total := max(firstNumber(a, "gen_ai.usage.total_tokens"), firstNumber(a, "gen_ai.usage.total.token_count"))
-		call := copilotCall{kind: kind, trace: r.TraceID, response: text(a["gen_ai.response.id"])}
+		call := copilotCall{kind: kind, trace: r.TraceID, response: text(a["gen_ai.response.id"]), service: text(a["github.copilot.service_request_id"])}
 		e := &call.Event
 		e.InputTokens, e.CacheReadTokens, e.CacheWriteTokens = inclusiveInput(input, cacheRead, cacheWrite)
 		e.OutputTokens, e.ReasoningTokens = output, reasoning
 		if reasoning > 0 && total == input+output+reasoning {
 			e.OutputTokens += reasoning
 		}
+		fillTotal(e, total)
 		if e.TotalTokens() == 0 {
 			continue
 		}
@@ -222,43 +240,21 @@ func parseCopilotOTel(path string) []event.Event {
 		}
 		e.Session = cmp.Or(e.Session, r.TraceID)
 		start, end := otelTime(r.StartTime), otelTime(r.EndTime)
-		e.Time = cmp.Or(start, end, otelTime(r.HRTime), otelTime(r.Timestamp), otelTime(r.ObservedTimestamp), otelTime(r.TimeUnixNano))
+		e.Time = cmp.Or(start, end, otelTime(r.HRTime), otelTime(r.Timestamp), otelTime(r.ObservedTimestamp), otelTime(r.TimeUnixNano), fileTime(path))
 		if start > 0 && end >= start {
 			e.LatencyMS = end - start
 		}
 		if kind >= copilotTurnLog {
 			e.Scope = event.ScopeTurn
 		}
-		e.ID = cmp.Or(call.response, r.TraceID+":"+r.SpanID)
-		if call.response == "" && (r.TraceID == "" || r.SpanID == "") {
-			e.ID = e.Session + ":" + strconv.FormatInt(e.Time, 10) + ":" + strconv.Itoa(i)
-		}
-		if best, ok := bestByTrace[call.trace]; !ok || kind < best {
-			bestByTrace[call.trace] = kind
-		}
-		if best, ok := bestByResponse[call.response]; !ok || kind < best {
-			bestByResponse[call.response] = kind
+		e.ID = cmp.Or(call.service, r.TraceID+":"+r.SpanID)
+		if call.service == "" && (r.TraceID == "" || r.SpanID == "") {
+			e.ID = cmp.Or(call.response, path+":"+strconv.Itoa(i))
 		}
 		calls = append(calls, call)
 	}
 
-	var events []event.Event
-	index := map[string]int{}
-	for _, call := range calls {
-		if call.trace != "" && call.kind > bestByTrace[call.trace] || call.response != "" && call.kind > bestByResponse[call.response] {
-			continue
-		}
-		// The CLI exports some chat spans twice; the earlier copy counts.
-		if i, seen := index[call.ID]; seen {
-			if call.Time < events[i].Time {
-				events[i] = call.Event
-			}
-			continue
-		}
-		index[call.ID] = len(events)
-		events = append(events, call.Event)
-	}
-	return events
+	return calls, nil
 }
 
 type copilotUsage struct {
@@ -267,54 +263,4 @@ type copilotUsage struct {
 	CacheReadTokens  int64 `json:"cacheReadTokens"`
 	CacheWriteTokens int64 `json:"cacheWriteTokens"`
 	ReasoningTokens  int64 `json:"reasoningTokens"` // Included in output.
-}
-
-// parseCopilotSessionState reads the shutdown snapshots of a session. They
-// are cumulative per model, so each one counts what changed since the
-// previous; a snapshot below its predecessor started counting again.
-func parseCopilotSessionState(path string) []event.Event {
-	session := filepath.Base(filepath.Dir(path))
-	previous := map[string]copilotUsage{}
-	var events []event.Event
-	_ = readLines(path, func(raw []byte) {
-		var line struct {
-			Type      string    `json:"type"`
-			ID        string    `json:"id"`
-			Timestamp timestamp `json:"timestamp"`
-			Data      struct {
-				ModelMetrics map[string]struct {
-					Usage *copilotUsage `json:"usage"`
-				} `json:"modelMetrics"`
-			} `json:"data"`
-		}
-		if json.Unmarshal(raw, &line) != nil || line.Type != "session.shutdown" {
-			return
-		}
-		for name, metrics := range line.Data.ModelMetrics {
-			model := copilotModel(name)
-			if metrics.Usage == nil || model == "" {
-				continue
-			}
-			usage, before := *metrics.Usage, previous[model]
-			previous[model] = usage
-			if usage.InputTokens >= before.InputTokens && usage.OutputTokens >= before.OutputTokens &&
-				usage.CacheReadTokens >= before.CacheReadTokens && usage.CacheWriteTokens >= before.CacheWriteTokens {
-				usage = copilotUsage{
-					InputTokens: usage.InputTokens - before.InputTokens, OutputTokens: usage.OutputTokens - before.OutputTokens,
-					CacheReadTokens: usage.CacheReadTokens - before.CacheReadTokens, CacheWriteTokens: usage.CacheWriteTokens - before.CacheWriteTokens,
-					ReasoningTokens: max(0, usage.ReasoningTokens-before.ReasoningTokens),
-				}
-			}
-			e := event.Event{
-				Agent: "copilot", ID: session + ":" + cmp.Or(line.ID, strconv.FormatInt(int64(line.Timestamp), 10)) + ":" + model,
-				Time: int64(line.Timestamp), Model: model, Session: session, Scope: event.ScopeSession, Source: path,
-				OutputTokens: usage.OutputTokens, ReasoningTokens: usage.ReasoningTokens,
-			}
-			e.InputTokens, e.CacheReadTokens, e.CacheWriteTokens = inclusiveInput(usage.InputTokens, usage.CacheReadTokens, usage.CacheWriteTokens)
-			if e.TotalTokens() > 0 {
-				events = append(events, e)
-			}
-		}
-	})
-	return events
 }

@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -76,10 +77,30 @@ func (s *Server) loadEvents() error {
 	if err != nil {
 		return err
 	}
+	events = withoutClaudeMirrors(events)
 	s.mu.Lock()
 	s.events = events
 	s.mu.Unlock()
 	return nil
+}
+
+// OpenCode's claude-agent provider stores a wrapper copy of Claude's main
+// thread usage. Keep its archive, but count the native transcript when present.
+func withoutClaudeMirrors(events []event.Event) []event.Event {
+	type sessionDay struct {
+		session string
+		day     int64
+	}
+	native := map[sessionDay]bool{}
+	for _, e := range events {
+		if e.Agent == "claude" && e.Kind != "sidechain" && e.Session != "" && e.Time > 0 && e.TotalTokens() > 0 {
+			native[sessionDay{e.Session, e.Time / 86400000}] = true
+		}
+	}
+	return slices.DeleteFunc(events, func(e event.Event) bool {
+		return (e.Agent == "opencode" || e.Agent == "kilo") && e.Provider == "claude-agent" &&
+			e.NativeSession != "" && native[sessionDay{e.NativeSession, e.Time / 86400000}]
+	})
 }
 
 func (s *Server) State() State {

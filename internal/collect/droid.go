@@ -21,14 +21,14 @@ func droid() Collector {
 // parseDroid reads a Factory Droid session's <id>.settings.json, which only
 // keeps the session's total usage. Sessions that name no model may mention it
 // in their <id>.jsonl transcript.
-func parseDroid(path string) ([]event.Event, error) {
+func parseDroid(path string) (Result, error) {
 	var settings map[string]any
 	if err := readJSON(path, &settings); err != nil {
-		return nil, nil
+		return Result{}, nil
 	}
 	usage := object(settings["tokenUsage"])
 	if usage == nil {
-		return nil, nil
+		return Result{}, nil
 	}
 	session := strings.TrimSuffix(filepath.Base(path), ".settings.json")
 	thinking := number(usage["thinkingTokens"])
@@ -41,7 +41,7 @@ func parseDroid(path string) ([]event.Event, error) {
 	}
 	fillTotal(&e, number(usage["totalTokens"]))
 	if e.TotalTokens() == 0 {
-		return nil, nil
+		return Result{}, nil
 	}
 	if e.Model == "" {
 		e.Model = droidTranscriptModel(strings.TrimSuffix(path, ".settings.json") + ".jsonl")
@@ -51,7 +51,7 @@ func parseDroid(path string) ([]event.Event, error) {
 			e.Time = info.ModTime().UnixMilli()
 		}
 	}
-	return []event.Event{e}, nil
+	return Result{Events: []event.Event{e}}, nil
 }
 
 // droidModel turns a model name into an ID: it drops the custom: prefix and

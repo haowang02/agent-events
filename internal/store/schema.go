@@ -49,6 +49,7 @@ var migrations = []string{
 	);`,
 	`ALTER TABLE sources ADD COLUMN parser INTEGER NOT NULL DEFAULT 0;
 	CREATE INDEX events_source ON events (source);`,
+	`ALTER TABLE events ADD COLUMN native_session TEXT NOT NULL DEFAULT '';`,
 }
 
 func migrate(db *sql.DB) error {

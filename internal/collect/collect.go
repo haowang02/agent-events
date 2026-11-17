@@ -31,7 +31,18 @@ type Collector struct {
 	// source, so that sources parsed before are parsed again.
 	Version int
 	List    func() ([]Source, error)
-	Parse   func(path string) ([]event.Event, error)
+	Parse   func(path string) (Result, error)
+}
+
+// Result separates stored requests from the identities reconciled while reading.
+type Result struct {
+	Events     []event.Event
+	Sessions   []string
+	Superseded []RecordRef
+}
+
+type RecordRef struct {
+	Agent, ID, Source string
 }
 
 // All returns a collector for every supported agent.
@@ -40,6 +51,11 @@ func All() []Collector {
 		claude(), codex(), openCode(), kilo(), antigravity(), gemini(), qwen(), copilot(), amp(),
 		codebuff(), droid(), goose(), grok(), hermes(), kimi(), openClaw(), pi(), zcode(),
 	}
+}
+
+func isDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 func homeDir(elem ...string) string {
@@ -94,6 +110,10 @@ func named(name string) func(path string) bool {
 // walk calls fn for every regular file below the roots that match accepts.
 // Missing roots are skipped.
 func walk(roots []string, accept func(path string) bool, fn func(path string, info fs.FileInfo)) error {
+	return walkPruned(roots, accept, fn, nil)
+}
+
+func walkPruned(roots []string, accept func(path string) bool, fn func(path string, info fs.FileInfo), prune func(string) bool) error {
 	seen := map[string]bool{}
 	for _, root := range roots {
 		err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
@@ -102,6 +122,9 @@ func walk(roots []string, accept func(path string) bool, fn func(path string, in
 					return nil
 				}
 				return err
+			}
+			if entry.IsDir() && path != root && prune != nil && prune(path) {
+				return fs.SkipDir
 			}
 			if !entry.Type().IsRegular() || seen[path] || !accept(path) {
 				return nil
@@ -121,10 +144,14 @@ func walk(roots []string, accept func(path string) bool, fn func(path string, in
 
 // files lists every file below the roots that match accepts as its own source.
 func files(agent string, roots []string, accept func(path string) bool) ([]Source, error) {
+	return filesPruned(agent, roots, accept, nil)
+}
+
+func filesPruned(agent string, roots []string, accept func(path string) bool, prune func(string) bool) ([]Source, error) {
 	var sources []Source
-	err := walk(roots, accept, func(path string, info fs.FileInfo) {
+	err := walkPruned(roots, accept, func(path string, info fs.FileInfo) {
 		sources = append(sources, Source{Agent: agent, Path: path, Size: info.Size(), MTime: info.ModTime().UnixNano()})
-	})
+	}, prune)
 	return sources, err
 }
 

@@ -9,7 +9,7 @@ import (
 func hermes() Collector {
 	paths := under(roots("HERMES_HOME", homeDir(".hermes")), "state.db")
 	return Collector{
-		Agent: "hermes",
+		Agent: "hermes", Version: 1,
 		List:  func() ([]Source, error) { return databases("hermes", paths...) },
 		Parse: parseHermes,
 	}
@@ -17,22 +17,22 @@ func hermes() Collector {
 
 // parseHermes reads the sessions table of the Hermes state database, which
 // only keeps each session's total usage.
-func parseHermes(path string) ([]event.Event, error) {
+func parseHermes(path string) (Result, error) {
 	db, err := openDatabase(path)
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	defer db.Close()
 	names, err := columns(db, "sessions")
 	if err != nil || !names["model"] {
-		return nil, err
+		return Result{}, err
 	}
-	rows, err := db.Query(fmt.Sprintf("SELECT id, TRIM(model), %s, %s, %s, %s, %s, %s, %s FROM sessions WHERE TRIM(model) != ''",
+	rows, err := db.Query(fmt.Sprintf("SELECT id, TRIM(model), %s, %s, %s, %s, %s, %s, %s FROM sessions WHERE id IS NOT NULL AND TRIM(model) != ''",
 		columnOr(names, "billing_provider", "''"), columnOr(names, "started_at", "NULL"), columnOr(names, "input_tokens", "0"),
 		columnOr(names, "output_tokens", "0"), columnOr(names, "cache_read_tokens", "0"), columnOr(names, "cache_write_tokens", "0"),
 		columnOr(names, "reasoning_tokens", "0")))
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	var events []event.Event
 	err = scanRows(rows, func() error {
@@ -52,5 +52,5 @@ func parseHermes(path string) ([]event.Event, error) {
 		}
 		return nil
 	})
-	return events, err
+	return Result{Events: events}, err
 }

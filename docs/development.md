@@ -6,11 +6,13 @@
 | --- | --- |
 | `cmd/agent-events` | 命令入口 |
 | `internal/event` | 请求记录的数据结构 |
-| `internal/collect` | 查找各 Agent 的数据源并解析出请求记录，每个 Agent 一个文件 |
+| `internal/collect` | 按 Agent 组织采集，共用格式合并，复杂格式按读取、用量与重放拆分 |
 | `internal/store` | SQLite 存储：请求记录、已解析数据源的签名、自定义价格 |
 | `internal/pricing` | 价格解析、models.dev 参考价和计费 |
 | `internal/server` | 定时采集、查询统计和 HTTP 接口 |
 | `web` | 网页界面，编译时嵌入二进制 |
+
+采集器返回 `collect.Result`：`Events` 是可存档的请求，`Sessions` 声明来源中仍存在的会话，`Superseded` 指定本次日志能证明已被覆盖的记录身份及来源。`internal/store/events.go` 在同一事务写入请求与来源签名，并完成协调；`event.Event` 只描述请求数据。
 
 `web/app.js` 负责顶栏、主题、同步状态与页面调度，各页面分别放在 `events.js`、`analysis.js`、`prices.js`。请求事件页的列定义、详情弹窗、列设置、分页和时间分布条分别在 `event-fields.js`、`event-detail.js`、`column-settings.js`、`pager.js`、`timeline.js`；统计页的指标卡在 `summary.js`。`controls.js` 提供下拉框、分段切换、弹层和复制按钮，`tooltip.js` 提供悬停提示，`data-table.js` 提供前端排序的表格，`date-range.js` 管理时间范围；DOM 工具与 Lucide 图标、图表绘制分别放在 `dom.js`、`charts.js`。
 

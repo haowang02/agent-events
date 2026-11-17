@@ -9,26 +9,26 @@ import (
 func zcode() Collector {
 	paths := under(roots("ZCODE_HOME", homeDir(".zcode")), "cli", "db", "db.sqlite")
 	return Collector{
-		Agent: "zcode",
+		Agent: "zcode", Version: 1,
 		List:  func() ([]Source, error) { return databases("zcode", paths...) },
 		Parse: parseZCode,
 	}
 }
 
 // parseZCode reads the completed requests of the ZCode model_usage ledger.
-func parseZCode(path string) ([]event.Event, error) {
+func parseZCode(path string) (Result, error) {
 	db, err := openDatabase(path)
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	defer db.Close()
 	usage, err := columns(db, "model_usage")
 	if err != nil || !usage["status"] || !usage["model_id"] {
-		return nil, err
+		return Result{}, err
 	}
 	session, err := columns(db, "session")
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	join := ""
 	if session["id"] {
@@ -37,12 +37,12 @@ func parseZCode(path string) ([]event.Event, error) {
 		session = nil
 	}
 	rows, err := db.Query(fmt.Sprintf(
-		"SELECT m.id, m.session_id, m.started_at, m.model_id, %s, %s, %s, %s, %s, %s, %s, %s FROM model_usage m %s WHERE m.status = 'completed'",
+		"SELECT m.id, m.session_id, m.started_at, m.model_id, %s, %s, %s, %s, %s, %s, %s, %s FROM model_usage m %s WHERE m.status = 'completed' AND m.id IS NOT NULL AND m.session_id IS NOT NULL AND m.model_id IS NOT NULL",
 		columnOr(usage, "m.provider_id", "''"), columnOr(usage, "m.input_tokens", "0"), columnOr(usage, "m.output_tokens", "0"),
 		columnOr(usage, "m.cache_read_input_tokens", "0"), columnOr(usage, "m.cache_creation_input_tokens", "0"),
 		columnOr(usage, "m.computed_total_tokens", "0"), columnOr(session, "s.directory", "''"), columnOr(session, "s.version", "''"), join))
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	var events []event.Event
 	err = scanRows(rows, func() error {
@@ -64,5 +64,5 @@ func parseZCode(path string) ([]event.Event, error) {
 		}
 		return nil
 	})
-	return events, err
+	return Result{Events: events}, err
 }

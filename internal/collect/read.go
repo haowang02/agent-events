@@ -66,6 +66,13 @@ func readJSON(path string, value any) error {
 	return json.Unmarshal(raw, value)
 }
 
+func fileTime(path string) int64 {
+	if info, err := os.Stat(path); err == nil {
+		return info.ModTime().UnixMilli()
+	}
+	return 0
+}
+
 func openDatabase(path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(5000)")
 	if err != nil {

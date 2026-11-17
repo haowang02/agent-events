@@ -20,14 +20,20 @@ func codebuff() Collector {
 		dirs = append(dirs, root)
 	}
 	return Collector{
-		Agent: "codebuff",
+		Agent: "codebuff", Version: 1,
 		List:  func() ([]Source, error) { return files("codebuff", dirs, named("chat-messages.json")) },
 		Parse: parseCodebuff,
 	}
 }
 
+type codebuffTokens struct {
+	event.Event
+	known [4]bool // fresh input, output, cache read, cache write
+	total int64
+}
+
 // codebuffUsage reads a usage object, whichever provider spelled it.
-func codebuffUsage(usage map[string]any) event.Event {
+func codebuffUsage(usage map[string]any) codebuffTokens {
 	e := event.Event{
 		InputTokens:  firstNumber(usage, "inputTokens", "input_tokens", "promptTokens", "prompt_tokens"),
 		OutputTokens: firstNumber(usage, "outputTokens", "output_tokens", "completionTokens", "completion_tokens"),
@@ -37,26 +43,58 @@ func codebuffUsage(usage map[string]any) event.Event {
 			"cache_creation_tokens", "cachedTokensCreated", "cached_tokens_created"),
 		Model: text(usage["model"]),
 	}
-	fillTotal(&e, firstNumber(usage, "totalTokens", "total_tokens", "total"))
-	return e
+	result := codebuffTokens{Event: e, total: firstNumber(usage, "totalTokens", "total_tokens", "total")}
+	for i, keys := range [][]string{
+		{"inputTokens", "input_tokens", "promptTokens", "prompt_tokens"},
+		{"outputTokens", "output_tokens", "completionTokens", "completion_tokens"},
+		{"cacheReadInputTokens", "cache_read_input_tokens"},
+		{"cacheCreationInputTokens", "cache_creation_input_tokens", "cacheCreationTokens", "cache_creation_tokens", "cachedTokensCreated", "cached_tokens_created"},
+	} {
+		for _, key := range keys {
+			if value, ok := usage[key]; ok && value != nil {
+				result.known[i] = true
+				break
+			}
+		}
+	}
+	details := object(usage["prompt_tokens_details"])
+	if details == nil {
+		details = object(usage["promptTokensDetails"])
+	}
+	if details != nil {
+		_, snake := details["cached_tokens"]
+		_, camel := details["cachedTokens"]
+		result.known[2] = result.known[2] || snake || camel
+		// Raw Chat Completions prompt_tokens already contains its cached subset.
+		// Explicit input buckets remain independent, as in Anthropic/normalized usage.
+		if usage["inputTokens"] == nil && usage["input_tokens"] == nil {
+			result.InputTokens, result.CacheReadTokens, result.CacheWriteTokens = inclusiveInput(result.InputTokens, result.CacheReadTokens, result.CacheWriteTokens)
+		}
+	}
+	return result
 }
 
 // codebuffFallback fills the token buckets and model e lacks from fallback.
-func codebuffFallback(e *event.Event, fallback event.Event) {
-	e.InputTokens = cmp.Or(e.InputTokens, fallback.InputTokens)
-	e.OutputTokens = cmp.Or(e.OutputTokens, fallback.OutputTokens)
-	e.CacheReadTokens = cmp.Or(e.CacheReadTokens, fallback.CacheReadTokens)
-	e.CacheWriteTokens = cmp.Or(e.CacheWriteTokens, fallback.CacheWriteTokens)
+func codebuffFallback(e *codebuffTokens, fallback codebuffTokens) {
+	target := []*int64{&e.InputTokens, &e.OutputTokens, &e.CacheReadTokens, &e.CacheWriteTokens}
+	values := []int64{fallback.InputTokens, fallback.OutputTokens, fallback.CacheReadTokens, fallback.CacheWriteTokens}
+	for i := range target {
+		if !e.known[i] {
+			*target[i] = values[i]
+			e.known[i] = fallback.known[i]
+		}
+	}
 	e.Model = cmp.Or(e.Model, fallback.Model)
+	e.total = cmp.Or(e.total, fallback.total)
 }
 
 // parseCodebuff reads projects/<project>/chats/<chat>/chat-messages.json.
 // Usage sits in the message metadata, or in the run state's message history
 // of the main agent.
-func parseCodebuff(path string) ([]event.Event, error) {
+func parseCodebuff(path string) (Result, error) {
 	var messages []map[string]any
 	if err := readJSON(path, &messages); err != nil {
-		return nil, nil
+		return Result{}, nil
 	}
 	chatDir := filepath.Dir(path)
 	chat := filepath.Base(chatDir)
@@ -95,13 +133,14 @@ func parseCodebuff(path string) ([]event.Event, error) {
 			fallback.Model = cmp.Or(text(codebuff["model"]), fallback.Model)
 			codebuffFallback(&e, fallback)
 		}
+		fillTotal(&e.Event, e.total)
 		if e.TotalTokens() == 0 {
 			continue
 		}
 		e.Agent, e.Session, e.Project, e.Source = "codebuff", session, project, path
 		e.ID = session + ":" + cmp.Or(text(message["id"]), strconv.Itoa(i))
 		e.Time = cmp.Or(timeValue(message["timestamp"]), timeValue(message["createdAt"]), timeValue(metadata["timestamp"]), fallbackTime)
-		events = append(events, e)
+		events = append(events, e.Event)
 	}
-	return events, nil
+	return Result{Events: events}, nil
 }

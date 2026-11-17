@@ -84,8 +84,8 @@ func (s *Server) scan() (changed bool, err error) {
 	for range min(runtime.NumCPU(), 8, len(jobs)) {
 		workers.Go(func() {
 			for item := range queue {
-				events, err := item.collector.Parse(item.source.Path)
-				results <- result{store.Parsed{Source: item.source, Events: events, Replace: item.replace}, err}
+				parsed, err := item.collector.Parse(item.source.Path)
+				results <- result{store.Parsed{Source: item.source, Result: parsed, Replace: item.replace}, err}
 			}
 		})
 	}

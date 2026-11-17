@@ -19,9 +19,9 @@ agent-events 只读取各 Agent 写在本机的日志和数据库，不修改它
 | OpenCode | `~/.local/share/opencode` 下的 `opencode.db`、`opencode-*.db` 和 `storage/message/**/*.json` | `OPENCODE_DATA_DIR`、`XDG_DATA_HOME` | 一次请求 | 从请求开始到响应结束；缺少响应结束时间时使用步骤结束时间，可能包含工具执行 |
 | Kilo Code | `~/.local/share/kilo/kilo.db` | `KILO_DATA_DIR` | 一次请求 | 同 OpenCode |
 | Antigravity | `~/.gemini/antigravity`、`antigravity-cli`、`antigravity-ide`、`antigravity-backup`、`antigravity-acp` 和 `~/.config/antigravity` 下的 `conversations/*.db` | `ANTIGRAVITY_DATA_DIR` | 一次请求 | 首字耗时加后续生成耗时；任一阶段缺失时总耗时未知 |
-| Gemini CLI | `~/.gemini/tmp/*/chats/` 下的 `*.json`、`*.jsonl` | `GEMINI_DATA_DIR` | 一次请求 | — |
-| Qwen Code | `~/.qwen/projects/*/chats/*.jsonl` | `QWEN_DATA_DIR` | 一次请求 | — |
-| GitHub Copilot CLI | `~/.copilot/otel/**/*.jsonl`、`~/.copilot/session-state/*/events.jsonl` | `COPILOT_HOME`、`COPILOT_OTEL_FILE_EXPORTER_PATH` | OpenTelemetry 导出为一次请求，会话快照为会话汇总 | OpenTelemetry span 的起止时间 |
+| Gemini CLI | `~/.gemini/tmp` 下的 `*.json`、`*.jsonl` | `GEMINI_DATA_DIR` | 一次请求，无逐请求记录时使用会话统计 | — |
+| Qwen Code | `~/.qwen/projects/*/chats/` 及其 `archive/` 下的 `*.jsonl` | `QWEN_DATA_DIR` | 一次请求 | — |
+| GitHub Copilot CLI | `~/.copilot/otel/**/*.jsonl`、`~/.copilot/session-state/*/events.jsonl` | `COPILOT_HOME`、`COPILOT_OTEL_FILE_EXPORTER_PATH` | OpenTelemetry 和 `session.usage_record` 为一次请求，关闭快照为会话汇总 | OpenTelemetry span 的起止时间 |
 | Amp | `~/.local/share/amp/threads/T-*.json` | `AMP_DATA_DIR` | 一次请求 | — |
 | Codebuff | `~/.config/manicode`、`manicode-dev`、`manicode-staging` 下的 `projects/**/chat-messages.json` | `CODEBUFF_DATA_DIR` | 一次请求 | — |
 | Factory Droid | `~/.factory/sessions/**/*.settings.json` | `DROID_SESSIONS_DIR` | 会话汇总 | — |
@@ -44,6 +44,8 @@ Codex 的会话类型优先保留 `subagent` 等线程角色，再根据客户�
 - 输入已包含缓存的记录（Codex、Copilot、Grok、ZCode 等）先减去缓存读写。
 - Gemini CLI 和 Qwen Code 的输入通常包含缓存读取，按总数是否吻合判断后再拆分。
 - 推理 Token 单独记录的（OpenCode、Droid、Hermes 等）计入输出。
+- Codebuff 的原始 OpenAI prompt_tokens 先减去其中的缓存；合并 metadata/runState 的详细用量后再补 total 的剩余部分，已记录的零值保持为零。
+- Antigravity 合并生成记录与步骤中的用量，包括 checkpoint 上下文压缩与独立重试；同一请求的镜像只计一次。开始时间优先使用生成记录，其次使用步骤创建时间；均缺失时使用会话时间或文件时间。
 - Claude Code 的缓存写入区分 5 分钟和 1 小时两种有效期，分别计价。
 - Claude Code 服务端回退时，额外记录有输出的前序模型用量；无输出的拒绝是否计费取决于拒绝类别，无法从每次尝试的用量中确定。
 
@@ -53,10 +55,12 @@ TPS = 输出 Token / 总延迟。
 
 同一个请求可能出现在多个数据源中，按请求标识只保留一条：
 
-- Claude Code 续接会话会把之前的响应写进新的记录文件，`/btw` 旁支对话会以新的请求 ID 重放主对话；Anthropic 的消息 ID 唯一标识一个响应。
-- Codex 的分叉会话和子代理会重放上级会话的用量，重放的记录带着新的时间；旧版本只有 `token_count` 的记录按累计用量识别。
-- OpenCode V2 分叉会话以新的消息 ID 复制上级会话的消息，按分叉点排除复制部分。
-- Pi 和 OpenClaw 分叉会话复制上级会话的消息，按时间、模型和用量识别。
-- Copilot CLI 会把部分请求导出两次；有 OpenTelemetry 记录的会话不再计入会话快照。
+- Claude Code 续接会话会把之前的响应写进新的记录文件，`/btw` 旁支对话会以新的请求 ID 重放主对话；Anthropic 的消息 ID 唯一标识一个响应。网关优先使用 requestId/requestRef；缺少请求身份时按会话与时间区分。
+- Codex 的分叉会话和子代理会重放上级会话的用量。只有 `token_count` 的记录按会话和累计用量识别；复制的前缀结合父历史与分叉时间继承原请求身份，分叉后的等量调用保持独立。父日志不可用时，按分叉瞬间的密集写入识别重放，子代理自身的响应记录结束重放判定。
+- OpenCode V2 分叉会话以新的消息 ID 复制上级会话的消息，按分叉点排除复制部分。使用 `claude-agent` 的会话通过 `native.sessionID` 关联原生 Claude 日志；同一 UTC 日已有原生主线程用量时，展示与汇总排除包装副本，原始记录仍存档。
+- Pi 和 OpenClaw 优先按会话和事件 ID 识别请求。Pi 分叉通过父会话、分叉时间、活动分支和匹配的重放前缀继承原请求身份；缺少父日志或链接无效时保留记录。时间和 Token 用量相同的独立请求不会直接合并。
+- Copilot CLI 会把部分请求导出两次；同一 response ID 下用量不同的调用保持独立。逐请求 `usage_record` 替换对应的 OpenTelemetry 调用，后续关闭快照与 accounting watermarks 不再重复计入这些调用。旧版关闭快照按累计差值统计，OpenTelemetry 补充最后快照之后的调用；其请求数超过快照记录时，使用 OpenTelemetry 补足缺失的关闭区间。
 
-重复时优先保留带有延迟信息的记录，其次保留时间最早的，即原始记录。
+重复时优先保留带有延迟信息的记录，其次保留时间最早的记录；并列时按来源路径固定优先级。同一来源重新解析时更新自己的记录。仍可从本次日志确认的镜像和被覆盖记录会在同一入库事务中撤销，不按缺失日志推断删除。
+
+日志格式参考 [ccusage](https://github.com/ccusage/ccusage/tree/58866ba681343634ab6e5add61f18f3b70aa98f7/rust/adapters) 的适配器实现与格式用例。费用仍按本项目的[价格规则](pricing.md)计算；客户端记录金额和不同日期归属口径可能产生差异。

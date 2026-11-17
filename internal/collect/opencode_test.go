@@ -2,12 +2,44 @@ package collect
 
 import (
 	"database/sql"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 )
 
-// A database migrated from V1 keeps V1 messages next to V2 ones; a V2 fork
-// copies its parent's history under new message IDs.
+func TestOpenCodeNativeClaudeSession(t *testing.T) {
+	var m openCodeMessage
+	if err := json.Unmarshal([]byte(`{"model":{"id":"opus","providerID":"claude-agent"},"tokens":{"input":100,"output":10},"content":[3,{"native":null},{"native":{"sessionID":"cs1"}}]}`), &m); err != nil {
+		t.Fatal(err)
+	}
+	e, ok := m.event("opencode", "m1", openCodeSession{})
+	if !ok || e.NativeSession != "cs1" {
+		t.Fatalf("native linkage missing: %+v", e)
+	}
+}
+
+func TestOpenCodeSQLTime(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "opencode.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	_, err = db.Exec(`CREATE TABLE message(id TEXT,session_id TEXT,time_created INTEGER,data TEXT); INSERT INTO message VALUES('m','s',1794704400,'{"role":"assistant","modelID":"m","tokens":{"input":10,"output":2}}');`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, agent := range []string{"opencode", "kilo"} {
+		events, err := eventsOnly(parseOpenCodeDatabase(agent, path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(events) != 1 || events[0].Time != 1794704400000 {
+			t.Fatalf("SQL seconds need the same normalization as JSON timestamps (%s): %+v", agent, events)
+		}
+	}
+}
+
 func TestParseOpenCodeDatabase(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "opencode.db")
 	db, err := sql.Open("sqlite", path)
@@ -37,7 +69,7 @@ func TestParseOpenCodeDatabase(t *testing.T) {
 	}
 	db.Close()
 
-	events, err := parseOpenCodeDatabase("opencode", path)
+	events, err := eventsOnly(parseOpenCodeDatabase("opencode", path))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,5 +96,25 @@ func TestParseOpenCodeDatabase(t *testing.T) {
 	}
 	if compaction := events[byID["c1"]]; compaction.Kind != "compaction" || compaction.Model != "m3" || compaction.InputTokens != 40 {
 		t.Errorf("compaction: %+v", compaction)
+	}
+}
+
+func TestOpenCodeUnknownForkBoundary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "opencode.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	_, err = db.Exec(`CREATE TABLE session_v2(id TEXT,fork_session_id TEXT,fork_boundary TEXT); CREATE TABLE session_message(id TEXT,session_id TEXT,seq INTEGER); INSERT INTO session_v2 VALUES('fork','parent','{"type":"future","messageID":"boundary"}'); INSERT INTO session_message VALUES('boundary','parent',10);`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copies, err := openCodeForkCopies(db, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(copies) != 0 {
+		t.Fatalf("unrecognized boundaries cannot justify dropping requests: %+v", copies)
 	}
 }

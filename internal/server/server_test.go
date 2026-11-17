@@ -118,3 +118,24 @@ func TestAnalysisTrend(t *testing.T) {
 		t.Fatalf("breakdown: %d rows", len(rows))
 	}
 }
+
+func TestClaudeAgentMirrors(t *testing.T) {
+	at := int64(1794704400000)
+	rows := []event.Event{
+		{Agent: "claude", ID: "native", Session: "cs1", Time: at, InputTokens: 100},
+		{Agent: "opencode", ID: "mirror", Provider: "claude-agent", NativeSession: "cs1", Time: at + 1000},
+		{Agent: "opencode", ID: "uncovered", Provider: "claude-agent", NativeSession: "cs1", Time: at + 86400000},
+		{Agent: "opencode", ID: "other", Provider: "anthropic", NativeSession: "cs1", Time: at},
+		{Agent: "claude", ID: "sub", Session: "cs2", Kind: "sidechain", Time: at},
+		{Agent: "opencode", ID: "sub-only", Provider: "claude-agent", NativeSession: "cs2", Time: at},
+	}
+	events := withoutClaudeMirrors(rows)
+	if len(events) != 5 {
+		t.Fatalf("mirror filtering: %+v", events)
+	}
+	for _, e := range events {
+		if e.ID == "mirror" {
+			t.Fatal("native usage counted twice")
+		}
+	}
+}

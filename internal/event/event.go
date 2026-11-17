@@ -39,11 +39,12 @@ type Event struct {
 	LatencyMS int64 `json:"latency_ms"` // 0 when unknown.
 	TTFTMS    int64 `json:"ttft_ms"`    // 0 when unknown.
 
-	Failed  bool   `json:"failed"`
-	Error   string `json:"error,omitempty"`
-	Stop    string `json:"stop,omitempty"`
-	Version string `json:"version,omitempty"`
-	Source  string `json:"source,omitempty"` // File or database the event was read from.
+	Failed        bool   `json:"failed"`
+	Error         string `json:"error,omitempty"`
+	Stop          string `json:"stop,omitempty"`
+	Version       string `json:"version,omitempty"`
+	Source        string `json:"source,omitempty"`         // File or database the event was read from.
+	NativeSession string `json:"native_session,omitempty"` // Native Claude session mirrored by OpenCode.
 }
 
 func (e *Event) PromptTokens() int64 {
